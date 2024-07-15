@@ -96,6 +96,7 @@ func read(filename string) []byte {
 	return content
 }
 
+// DoTask 执行mapf或者reducef任务
 func DoTask(info TaskInfo, mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	fConts := make([]io.Writer, info.NReduce)
 
@@ -122,7 +123,7 @@ func DoTask(info TaskInfo, mapf func(string, string) []KeyValue, reducef func(st
 
 	case Reduce:
 
-		os.Create(fmt.Sprintf("mr-out-%v", info.TaskId))
+		fileOS, _ := os.Create(fmt.Sprintf("mr-out-%v", info.TaskId))
 
 		//读取文件
 		info.FileContent = read(info.FileName)
@@ -152,23 +153,10 @@ func DoTask(info TaskInfo, mapf func(string, string) []KeyValue, reducef func(st
 			//每个key对应的计数
 			value := reducef(KVs[i].Key, values)
 			KVsRes = append(KVsRes, KeyValue{KVs[i].Key, value})
+
+			fmt.Fprintf(fileOS, "%v %v\n", KVs[i].Key, KVsRes)
+
 			i = j
-		}
-
-		for j := 1; j <= info.FileNum; j++ {
-			fileName := fmt.Sprintf("mr-out-%v", info.TaskId)
-
-			f, _ := os.Open(fileName)
-			fConts[j-1] = f
-			defer f.Close()
-
-			for {
-				var kv KeyValue
-				if err := dec.Decode(&kv); err != nil {
-					break
-				}
-				KVs = append(KVs, kv)
-			}
 		}
 
 	}
