@@ -1,8 +1,6 @@
 package mr
 
 import (
-	"fmt"
-	"io/ioutil"
 	"log"
 )
 import "net"
@@ -12,7 +10,8 @@ import "net/http"
 
 type Coordinator struct {
 	// Your definitions here.
-
+	files   []string
+	nReduce int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -56,36 +55,14 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	c := Coordinator{
+		files:   files,
+		nReduce: nReduce,
+	}
 
 	// Your code here.
 
-	//创建nxm个中间文件   XXXX 应该在Map中进行建立，不涉及并发安全，每个只对应一个Map或Reduce
-	Num := len(files)
-	for i := 1; i <= Num; i++ {
-		for j := 1; j <= nReduce; j++ {
-			fileName := fmt.Sprintf("mr-%v-%v", i, j)
-			os.Create(fileName)
-		}
-	}
-
-	for _, fileName := range files {
-		file, err := os.Open(fileName)
-
-		if err != nil {
-			log.Fatalf("cannot open %v", fileName)
-		}
-		content, err := ioutil.ReadAll(file)
-		if err != nil {
-			log.Fatalf("cannot read %v", fileName)
-		}
-		file.Close()
-
-		//woker??
-		kva := mapf(fileName, string(content))
-		intermediate = append(intermediate, kva...)
-	}
-
 	c.server()
+	c.AssignTask()
 	return &c
 }
