@@ -25,6 +25,9 @@ type ExampleReply struct {
 // Add your RPC definitions here.
 
 type Args struct {
+	state    int
+	Tasktype int
+	TaskId   int
 }
 
 type TaskInfo struct {
@@ -37,8 +40,8 @@ type TaskInfo struct {
 	FileName    string
 	FileContent any
 
-	Key    string //reduce所需信息
-	Values []string
+	//Key    string //reduce所需信息
+	//Values []string
 }
 
 // Cook up a unique-ish UNIX-domain socket name

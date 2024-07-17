@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 	"sort"
+	"time"
 )
 import "log"
 import "net/rpc"
@@ -21,8 +22,14 @@ func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 const (
-	Map    = iota
-	Reduce = iota
+	Map = iota
+	Reduce
+	Over
+)
+const (
+	Idle = iota
+	Busy
+	Finish
 )
 
 // Map functions return a slice of KeyValue.
@@ -42,22 +49,30 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	// Your worker implementation here.
-	var TaskInfo TaskInfo
-	TaskInfo = GetTask()
+	var TaskInfo = &TaskInfo{}
+	var Res = &Args{state: Idle} //初始化为idle状态
 
+	GetTask(Res, TaskInfo)
+	go AssignAnother()
 	DoTask(TaskInfo, mapf, reducef)
+	Done(Res)
 
 	// uncomment to send the Example RPC to the coordinator.
 	//CallExample()
 
 }
 
-func GetTask() TaskInfo {
-	call("Coordinator.AssignTask", &Args{}, &TaskInfo{})
-	return TaskInfo{}
+func GetTask(args *Args, TaskInfo *TaskInfo) {
+	// 调用coordinator获取任务
+	for TaskInfo.TaskId == 0 {
+		call("Coordinator.AssignTask", args, TaskInfo)
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return
 }
 
-func writeKVs(KVs []KeyValue, info TaskInfo, fConts []io.Writer) {
+func writeKVs(KVs []KeyValue, info *TaskInfo, fConts []io.Writer) {
 	//fConts := make([]io.Writer, info.NReduce)
 	KVset := make([][]KeyValue, info.NReduce)
 
@@ -97,7 +112,7 @@ func read(filename string) []byte {
 }
 
 // DoTask 执行mapf或者reducef任务
-func DoTask(info TaskInfo, mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	fConts := make([]io.Writer, info.NReduce)
 
 	switch info.TaskType {
@@ -161,6 +176,16 @@ func DoTask(info TaskInfo, mapf func(string, string) []KeyValue, reducef func(st
 
 	}
 
+}
+
+func Done(args *Args) {
+	args.state = Finish
+	call("Coordinator.WorkerDone", args, &TaskInfo{})
+}
+
+func AssignAnother(args *Args) {
+	time.After(10 * time.Second)
+	call("Coordinator.Err", args, &TaskInfo{})
 }
 
 // example function to show how to make an RPC call to the coordinator.
