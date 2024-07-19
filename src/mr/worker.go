@@ -3,7 +3,6 @@ package mr
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
 	"sort"
@@ -33,6 +32,7 @@ const (
 )
 
 // Map functions return a slice of KeyValue.
+
 type KeyValue struct {
 	Key   string
 	Value string
@@ -40,6 +40,7 @@ type KeyValue struct {
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
+
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
@@ -47,15 +48,36 @@ func ihash(key string) int {
 }
 
 // main/mrworker.go calls this function.
+
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	// Your worker implementation here.
-	var TaskInfo = &TaskInfo{}
-	var Res = &Args{state: Idle} //初始化为idle状态
 
-	GetTask(Res, TaskInfo)
-	go AssignAnother()
-	DoTask(TaskInfo, mapf, reducef)
-	Done(Res)
+	var TaskInfo = &TaskInfo{}
+	var Res = &Args{State: Idle} //初始化为idle状态
+	Ch := make(chan bool)
+	for {
+		GetTask(Res, TaskInfo)
+
+		//主任务结束后不再请求
+		if TaskInfo.TaskType == Over {
+			break
+		}
+
+		go AssignAnother(Ch)
+		go DoTask(TaskInfo, mapf, reducef, Ch)
+
+		select {
+		/*		case Ch <- true:
+					Done(Res)
+				case Ch <- false:
+					call("Coordinator.Err", Res, &TaskInfo)*/
+
+		case <-Ch:
+			Done(Res)
+		default:
+			call("Coordinator.Err", Res, &TaskInfo)
+		}
+	}
 
 	// uncomment to send the Example RPC to the coordinator.
 	//CallExample()
@@ -64,15 +86,18 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 func GetTask(args *Args, TaskInfo *TaskInfo) {
 	// 调用coordinator获取任务
-	for TaskInfo.TaskId == 0 {
+	for {
 		call("Coordinator.AssignTask", args, TaskInfo)
+		if TaskInfo.TaskType != Idle {
+			break
+		}
+
 		time.Sleep(100 * time.Millisecond)
 	}
-
-	return
+	fmt.Printf("Type:%v,Id:%v\n", TaskInfo.TaskType, TaskInfo.TaskId)
 }
 
-func writeKVs(KVs []KeyValue, info *TaskInfo, fConts []io.Writer) {
+func writeKVs(KVs []KeyValue, info *TaskInfo, fConts []*os.File) {
 	//fConts := make([]io.Writer, info.NReduce)
 	KVset := make([][]KeyValue, info.NReduce)
 
@@ -86,15 +111,15 @@ func writeKVs(KVs []KeyValue, info *TaskInfo, fConts []io.Writer) {
 	//
 	//	defer f.Close()
 	//}
-
+	var Order int
 	for _, v := range KVs {
-		var Order int
-		Order = ihash(v.Key)
+		Order = ihash(v.Key) % info.NReduce
 		KVset[Order] = append(KVset[Order], v)
 	}
 	for i, v := range KVset {
 		data, _ := json.Marshal(v)
-		fConts[i+1].Write(data)
+		fmt.Println(data)
+		fConts[i].Write(data)
 	}
 }
 
@@ -112,8 +137,9 @@ func read(filename string) []byte {
 }
 
 // DoTask 执行mapf或者reducef任务
-func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
-	fConts := make([]io.Writer, info.NReduce)
+
+func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(string, []string) string, Ch chan bool) {
+	//fConts := make([]io.Writer, info.NReduce)
 
 	switch info.TaskType {
 	case Map:
@@ -123,14 +149,28 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 		//将其排序
 		sort.Sort(ByKey(KVs))
 
-		for j := 1; j <= info.NReduce; j++ {
+		var fConts []*os.File // 修改为 *os.File 类型
+
+		for j := 0; j < info.NReduce; j++ {
 
 			fileName := fmt.Sprintf("mr-%v-%v", info.TaskId, j)
-			os.Create(fileName)
-
-			f, _ := os.Open(fileName)
-			fConts[j-1] = f
-
+			//_, err := os.Create(fileName)
+			//if err != nil {
+			//	fmt.Println(err)
+			//	return
+			//}
+			//
+			//f, _ := os.Open(fileName)
+			//fConts[j-1] = f
+			//
+			//defer f.Close()
+			f, err := os.Create(fileName) // 直接使用 Create 函数
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+			//fConts[j] = f
+			fConts = append(fConts, f)
 			defer f.Close()
 		}
 
@@ -138,8 +178,12 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 
 	case Reduce:
 
-		fileOS, _ := os.Create(fmt.Sprintf("mr-out-%v", info.TaskId))
-
+		fileOS, err := os.Create(fmt.Sprintf("mr-out-%v", info.TaskId))
+		if err != nil {
+			fmt.Println("Error creating file:", err)
+			return
+		}
+		defer fileOS.Close()
 		//读取文件
 		info.FileContent = read(info.FileName)
 
@@ -147,7 +191,7 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 		var KVsRes []KeyValue
 
 		//解码为KVs
-		err := json.Unmarshal(info.FileContent.([]byte), &KVs)
+		err = json.Unmarshal(info.FileContent.([]byte), &KVs)
 		if err != nil {
 			return
 		}
@@ -175,17 +219,19 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 		}
 
 	}
+	Ch <- true
 
 }
 
 func Done(args *Args) {
-	args.state = Finish
+	args.State = Finish
 	call("Coordinator.WorkerDone", args, &TaskInfo{})
 }
 
-func AssignAnother(args *Args) {
+func AssignAnother(Ch chan bool) {
 	time.After(10 * time.Second)
-	call("Coordinator.Err", args, &TaskInfo{})
+
+	Ch <- false
 }
 
 // example function to show how to make an RPC call to the coordinator.
@@ -218,9 +264,11 @@ func CallExample() {
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
+
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
+	//fmt.Println("Worker is dialing", sockname)
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
 		log.Fatal("dialing:", err)
