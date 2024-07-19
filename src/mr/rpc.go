@@ -31,11 +31,12 @@ type Args struct {
 }
 
 type TaskInfo struct {
+	Status int
+
 	TaskType int //任务基本信息
 	TaskId   int
 
 	NReduce int
-	FileNum int
 
 	FileName    string
 	FileContent any
