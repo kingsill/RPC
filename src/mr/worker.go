@@ -3,7 +3,7 @@ package mr
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"sort"
 	"time"
@@ -62,21 +62,21 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		if TaskInfo.TaskType == Over {
 			break
 		}
-
+		fmt.Println("do it!")
 		go AssignAnother(Ch)
 		go DoTask(TaskInfo, mapf, reducef, Ch)
 
-		select {
-		/*		case Ch <- true:
-					Done(Res)
-				case Ch <- false:
-					call("Coordinator.Err", Res, &TaskInfo)*/
+		sign := <-Ch
 
-		case <-Ch:
-			Done(Res)
-		default:
+		if sign == true {
+			Done(Res, TaskInfo)
+			fmt.Println("Finish one")
+		} else {
+			TaskInfo.Status = Idle
+			fmt.Println("err one")
 			call("Coordinator.Err", Res, &TaskInfo)
 		}
+		time.Sleep(time.Second)
 	}
 
 	// uncomment to send the Example RPC to the coordinator.
@@ -88,11 +88,11 @@ func GetTask(args *Args, TaskInfo *TaskInfo) {
 	// 调用coordinator获取任务
 	for {
 		call("Coordinator.AssignTask", args, TaskInfo)
-		if TaskInfo.TaskType != Idle {
+		fmt.Println(TaskInfo)
+		if TaskInfo.Status != Idle {
 			break
 		}
-
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(time.Second)
 	}
 	fmt.Printf("Type:%v,Id:%v\n", TaskInfo.TaskType, TaskInfo.TaskId)
 }
@@ -100,6 +100,8 @@ func GetTask(args *Args, TaskInfo *TaskInfo) {
 func writeKVs(KVs []KeyValue, info *TaskInfo, fConts []*os.File) {
 	//fConts := make([]io.Writer, info.NReduce)
 	KVset := make([][]KeyValue, info.NReduce)
+
+	fmt.Println("start write")
 
 	//for j := 1; j <= info.NReduce; j++ {
 	//
@@ -116,19 +118,32 @@ func writeKVs(KVs []KeyValue, info *TaskInfo, fConts []*os.File) {
 		Order = ihash(v.Key) % info.NReduce
 		KVset[Order] = append(KVset[Order], v)
 	}
+	//fmt.Println("kvset:", KVset)
+
 	for i, v := range KVset {
-		data, _ := json.Marshal(v)
-		fmt.Println(data)
-		fConts[i].Write(data)
+
+		for _, value := range v {
+			data, _ := json.Marshal(value)
+			_, err := fConts[i].Write(data)
+
+			//fmt.Println("data: ", data)
+			//fmt.Println("numbers:", write)
+			if err != nil {
+				return
+			}
+
+		}
 	}
+	fmt.Println("finish write")
 }
 
 func read(filename string) []byte {
+	fmt.Println("read", filename)
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
 	}
-	content, err := ioutil.ReadAll(file)
+	content, err := io.ReadAll(file)
 	if err != nil {
 		log.Fatalf("cannot read %v", filename)
 	}
@@ -141,9 +156,12 @@ func read(filename string) []byte {
 func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(string, []string) string, Ch chan bool) {
 	//fConts := make([]io.Writer, info.NReduce)
 
+	fmt.Println("start", info.TaskId)
+
 	switch info.TaskType {
 	case Map:
 		info.FileContent = string(read(info.FileName))
+		//fmt.Println(info.FileContent)
 		KVs := mapf(info.FileName, info.FileContent.(string))
 
 		//将其排序
@@ -151,6 +169,7 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 
 		var fConts []*os.File // 修改为 *os.File 类型
 
+		//0-9
 		for j := 0; j < info.NReduce; j++ {
 
 			fileName := fmt.Sprintf("mr-%v-%v", info.TaskId, j)
@@ -169,6 +188,9 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 				fmt.Println(err)
 				return
 			}
+
+			fmt.Println("creatfile:  ", fileName)
+
 			//fConts[j] = f
 			fConts = append(fConts, f)
 			defer f.Close()
@@ -223,13 +245,14 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 
 }
 
-func Done(args *Args) {
+func Done(args *Args, info *TaskInfo) {
 	args.State = Finish
-	call("Coordinator.WorkerDone", args, &TaskInfo{})
+	info.Status = Idle
+	call("Coordinator.WorkerDone", args, info)
 }
 
 func AssignAnother(Ch chan bool) {
-	time.After(10 * time.Second)
+	time.Sleep(10 * time.Second)
 
 	Ch <- false
 }

@@ -41,19 +41,25 @@ func (c *Coordinator) AssignTask(args *Args, reply *TaskInfo) error {
 			args.TaskId = i + 1
 			reply.TaskType = Map
 			reply.FileName = task.fileName
+			fmt.Println(task.fileName)
 			reply.TaskId = i + 1      //range从0开始
 			reply.NReduce = c.nReduce // 设置 NReduce
+			reply.Status = Busy
+			task.state = Busy
+			fmt.Println("map")
+			return nil
 		}
-		return nil
 	}
 
 	//Map完成后再Reduce
 	for _, task := range c.TaskMap {
 		if task.state != Finish {
-
+			fmt.Println("等待Map完成")
 			return nil
 		}
 	}
+
+	fmt.Println("MapDone")
 
 	//分配Reduce
 	for i, v := range c.ReduceMap {
@@ -63,15 +69,17 @@ func (c *Coordinator) AssignTask(args *Args, reply *TaskInfo) error {
 			reply.TaskType = Reduce
 			reply.TaskId = i + 1
 			reply.NReduce = c.nReduce // 设置 NReduce
+			reply.Status = Busy
+			v = Busy
+			fmt.Println("reduce")
+			return nil
 		}
-		return nil
 	}
 
 	//Reduce都结束则成功
 	for _, v := range c.ReduceMap {
 		if v == Finish {
 		} else {
-			c.Lock.Unlock()
 			return nil
 		}
 	}
@@ -152,7 +160,7 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-
+	fmt.Println(files)
 	TaskMapR = make(map[int]*Task, len(files))
 
 	for i, file := range files {
