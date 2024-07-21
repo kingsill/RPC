@@ -37,6 +37,7 @@ type TaskInfo struct {
 	TaskId   int
 
 	NReduce int
+	Nmap    int
 
 	FileName    string
 	FileContent any

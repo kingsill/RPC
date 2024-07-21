@@ -52,29 +52,31 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	// Your worker implementation here.
 
-	var TaskInfo = &TaskInfo{}
-	var Res = &Args{State: Idle} //初始化为idle状态
 	Ch := make(chan bool)
 	for {
-		GetTask(Res, TaskInfo)
+		var Res = &Args{State: Idle} //初始化为idle状态
+		var TaskInformation = &TaskInfo{}
+		GetTask(Res, TaskInformation)
 
 		//主任务结束后不再请求
-		if TaskInfo.TaskType == Over {
+		if TaskInformation.TaskType == Over {
 			break
 		}
-		fmt.Println("do it!")
-		go AssignAnother(Ch)
-		go DoTask(TaskInfo, mapf, reducef, Ch)
+		//fmt.Println("do it!")
+		go DoTask(TaskInformation, mapf, reducef, Ch)
 
 		sign := <-Ch
+		//fmt.Println("sign:", sign)
 
 		if sign == true {
-			Done(Res, TaskInfo)
-			fmt.Println("Finish one")
+			fmt.Println("Finish one,ID:", TaskInformation.TaskId)
+			Done(Res, TaskInformation)
+
 		} else {
-			TaskInfo.Status = Idle
-			fmt.Println("err one")
-			call("Coordinator.Err", Res, &TaskInfo)
+			//TaskInformation.Status = Idle
+			fmt.Println("err one,ID:", TaskInformation.TaskId)
+			call("Coordinator.Err", Res, TaskInformation)
+			Res = &Args{State: Idle}
 		}
 		time.Sleep(time.Second)
 	}
@@ -84,24 +86,32 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 }
 
-func GetTask(args *Args, TaskInfo *TaskInfo) {
+func GetTask(Args *Args, TaskInformation *TaskInfo) {
 	// 调用coordinator获取任务
 	for {
-		call("Coordinator.AssignTask", args, TaskInfo)
-		fmt.Println(TaskInfo)
-		if TaskInfo.Status != Idle {
+		call("Coordinator.AssignTask", Args, TaskInformation)
+		//fmt.Println(TaskInformation)
+
+		if TaskInformation.Status != Idle {
+			Args.State = Busy
+			Args.Tasktype = TaskInformation.TaskType
+			Args.TaskId = TaskInformation.TaskId
+			//fmt.Println("TaskInfo:", TaskInformation)
+			//fmt.Println("Args：", Args)
+			call("Coordinator.Verify", Args, TaskInformation)
 			break
 		}
+
 		time.Sleep(time.Second)
 	}
-	fmt.Printf("Type:%v,Id:%v\n", TaskInfo.TaskType, TaskInfo.TaskId)
+	fmt.Printf("Type:%v,Id:%v\n", TaskInformation.TaskType, TaskInformation.TaskId)
 }
 
 func writeKVs(KVs []KeyValue, info *TaskInfo, fConts []*os.File) {
 	//fConts := make([]io.Writer, info.NReduce)
 	KVset := make([][]KeyValue, info.NReduce)
 
-	fmt.Println("start write")
+	//fmt.Println("start write")
 
 	//for j := 1; j <= info.NReduce; j++ {
 	//
@@ -134,20 +144,22 @@ func writeKVs(KVs []KeyValue, info *TaskInfo, fConts []*os.File) {
 
 		}
 	}
-	fmt.Println("finish write")
+	//fmt.Println("finish write")
 }
 
 func read(filename string) []byte {
-	fmt.Println("read", filename)
+	//fmt.Println("read", filename)
 	file, err := os.Open(filename)
+	defer file.Close()
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
+		fmt.Println(err)
 	}
 	content, err := io.ReadAll(file)
 	if err != nil {
 		log.Fatalf("cannot read %v", filename)
 	}
-	file.Close()
+
 	return content
 }
 
@@ -157,13 +169,13 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 	//fConts := make([]io.Writer, info.NReduce)
 
 	fmt.Println("start", info.TaskId)
-
+	//go AssignAnother(Ch)
 	switch info.TaskType {
 	case Map:
 		info.FileContent = string(read(info.FileName))
 		//fmt.Println(info.FileContent)
 		KVs := mapf(info.FileName, info.FileContent.(string))
-
+		//fmt.Println("map:", KVs)
 		//将其排序
 		sort.Sort(ByKey(KVs))
 
@@ -189,7 +201,7 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 				return
 			}
 
-			fmt.Println("creatfile:  ", fileName)
+			//fmt.Println("creatfile:  ", fileName)
 
 			//fConts[j] = f
 			fConts = append(fConts, f)
@@ -201,43 +213,57 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 	case Reduce:
 
 		fileOS, err := os.Create(fmt.Sprintf("mr-out-%v", info.TaskId))
+		//fmt.Println("create success")
 		if err != nil {
 			fmt.Println("Error creating file:", err)
 			return
 		}
 		defer fileOS.Close()
 		//读取文件
-		info.FileContent = read(info.FileName)
+		for i := 0; i < info.Nmap; i++ {
+			fileName := fmt.Sprintf("mr-%v-%v", i, info.TaskId)
+			//fmt.Println(fileName)
 
-		var KVs []KeyValue
-		var KVsRes []KeyValue
-
-		//解码为KVs
-		err = json.Unmarshal(info.FileContent.([]byte), &KVs)
-		if err != nil {
-			return
-		}
-
-		//整理并传输内容给reduce
-		i := 0
-		for i < len(KVs) {
-			j := i + 1
-			for j < len(KVs) && KVs[j].Key == KVs[i].Key {
-				j++
+			file, err := os.Open(fileName)
+			defer file.Close()
+			if err != nil {
+				fmt.Println(err)
 			}
-			values := []string{}
-			for k := i; k < j; k++ {
-				values = append(values, KVs[k].Value)
+
+			dec := json.NewDecoder(file)
+			var KVs []KeyValue
+			for {
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					break
+				}
+				//fmt.Println(kv)
+				KVs = append(KVs, kv)
 			}
-			// this is the correct format for each line of Reduce output.
 
-			//每个key对应的计数
-			value := reducef(KVs[i].Key, values)
-			KVsRes = append(KVsRes, KeyValue{KVs[i].Key, value})
+			var KVsRes []KeyValue
 
-			fmt.Fprintf(fileOS, "%v %v\n", KVs[i].Key, KVsRes)
+			//整理并传输内容给reduce
+			i := 0
+			for i < len(KVs) {
+				j := i + 1
+				for j < len(KVs) && KVs[j].Key == KVs[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, KVs[k].Value)
+				}
+				// this is the correct format for each line of Reduce output.
 
-			i = j
+				//每个key对应的计数
+				value := reducef(KVs[i].Key, values)
+				KVsRes = append(KVsRes, KeyValue{KVs[i].Key, value})
+
+				fmt.Fprintf(fileOS, "%v %v\n", KVs[i].Key, KVsRes)
+
+				i = j
+			}
 		}
 
 	}
@@ -245,14 +271,17 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 
 }
 
-func Done(args *Args, info *TaskInfo) {
-	args.State = Finish
-	info.Status = Idle
-	call("Coordinator.WorkerDone", args, info)
+func Done(Arg *Args, Info *TaskInfo) {
+
+	//Info.Status = Idle
+	call("Coordinator.WorkerDone", Arg, Info)
+
+	//arg重新清空
+	Arg = &Args{State: Idle}
 }
 
 func AssignAnother(Ch chan bool) {
-	time.Sleep(10 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	Ch <- false
 }

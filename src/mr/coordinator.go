@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 )
 import "net"
 import "os"
@@ -12,12 +13,12 @@ import "net/http"
 
 type Coordinator struct {
 	// Your definitions here.
-	files     []string
-	nReduce   int
-	TaskMap   map[int]*Task
-	ReduceMap []int
-	OK        bool
-	Lock      sync.Mutex
+	files      []string
+	nReduce    int
+	MapTask    map[int]*Task
+	ReduceTask []int
+	OK         bool
+	Lock       sync.Mutex
 }
 
 type Task struct {
@@ -27,91 +28,132 @@ type Task struct {
 
 var TaskMapR map[int]*Task
 
-// Your code here -- RPC handlers for the worker to call.
-func (c *Coordinator) AssignTask(args *Args, reply *TaskInfo) error {
+func (c *Coordinator) Verify(Arg *Args, Reply *TaskInfo) error {
 
+	switch Arg.Tasktype {
+	case Map:
+		time.Sleep(3 * time.Second)
+		if c.MapTask[Arg.TaskId].state != Finish {
+			c.MapTask[Arg.TaskId].state = Idle
+			Reply = &TaskInfo{}
+		}
+	case Reduce:
+		time.Sleep(3 * time.Second)
+		if c.ReduceTask[Arg.TaskId] != Finish {
+			c.ReduceTask[Arg.TaskId] = Idle
+			Reply = &TaskInfo{}
+		}
+	}
+	return nil
+}
+
+// Your code here -- RPC handlers for the worker to call.
+func (c *Coordinator) AssignTask(Arg *Args, Reply *TaskInfo) error {
 	c.Lock.Lock()
 	defer c.Lock.Unlock()
+	//如果请求为空闲
+	if Arg.State == Idle {
 
-	args.State = Busy
-	//首先分配Map
-	for i, task := range c.TaskMap {
-		if task.state == Idle {
-			args.Tasktype = Map
-			args.TaskId = i + 1
-			reply.TaskType = Map
-			reply.FileName = task.fileName
-			fmt.Println(task.fileName)
-			reply.TaskId = i + 1      //range从0开始
-			reply.NReduce = c.nReduce // 设置 NReduce
-			reply.Status = Busy
-			task.state = Busy
-			fmt.Println("map")
-			return nil
+		//Args.State = Busy
+		//首先分配Map
+		for i, task := range c.MapTask {
+			//fmt.Println(*task, "Id:", i)
+			if task.state == Idle {
+				//Arg.Tasktype = Map
+				//Arg.TaskId = i + 1
+				Reply.TaskType = Map
+				Reply.FileName = task.fileName
+
+				//fmt.Println(task.fileName)
+
+				Reply.TaskId = i          //range从0开始
+				Reply.NReduce = c.nReduce // 设置 NReduce
+				Reply.Status = Busy
+				task.state = Busy
+				fmt.Println("map,Id:", i)
+				return nil
+			}
 		}
-	}
 
-	//Map完成后再Reduce
-	for _, task := range c.TaskMap {
-		if task.state != Finish {
-			fmt.Println("等待Map完成")
-			return nil
+		//Map完成后再Reduce
+		for _, task := range c.MapTask {
+			if task.state != Finish {
+				fmt.Println("等待Map完成")
+				return nil
+			}
 		}
-	}
 
-	fmt.Println("MapDone")
+		//fmt.Println("MapDone")
 
-	//分配Reduce
-	for i, v := range c.ReduceMap {
-		if v == Idle {
-			args.Tasktype = Reduce
-			args.TaskId = i + 1
-			reply.TaskType = Reduce
-			reply.TaskId = i + 1
-			reply.NReduce = c.nReduce // 设置 NReduce
-			reply.Status = Busy
-			v = Busy
-			fmt.Println("reduce")
-			return nil
+		//分配Reduce
+		for i, v := range c.ReduceTask {
+			fmt.Println(c.ReduceTask)
+			if v == Idle {
+				Arg.Tasktype = Reduce
+				Arg.TaskId = i
+				Reply.TaskType = Reduce
+				Reply.TaskId = i
+				Reply.NReduce = c.nReduce // 设置 NReduce
+				Reply.Status = Busy
+				Reply.Nmap = len(c.files)
+				c.ReduceTask[i] = Busy
+				fmt.Println(c.ReduceTask[i])
+				fmt.Println("reduce", i)
+				return nil
+			}
 		}
-	}
 
-	//Reduce都结束则成功
-	for _, v := range c.ReduceMap {
-		if v == Finish {
-		} else {
-			return nil
+		//Reduce都结束则成功
+		for _, v := range c.ReduceTask {
+			if v == Finish {
+			} else {
+				return nil
+			}
 		}
+		Reply.TaskType = Over
+		c.OK = true
 	}
-	reply.TaskType = Over
-	c.OK = true
 
 	return nil
 }
 
 func (c *Coordinator) WorkerDone(args *Args, reply *TaskInfo) error {
-	c.Lock.Lock()
-	defer c.Lock.Unlock()
+	//c.Lock.Lock()
+	//defer c.Lock.Unlock()
+
+	//reply清空
+	reply = &TaskInfo{}
+	//args.State = Finish
+
 	id := args.TaskId
+	//fmt.Println("id", id)
 	switch args.Tasktype {
 	case Map:
-		c.TaskMap[id-1].state = Finish
+		c.MapTask[id].state = Finish
+		//fmt.Println(*c.MapTask[id])
 	case Reduce:
-		c.ReduceMap[id-1] = Finish
+		c.ReduceTask[id] = Finish
+		//fmt.Println(c.ReduceTask)
 	}
 	return nil
 }
 
 func (c *Coordinator) Err(args *Args, reply *TaskInfo) error {
-	c.Lock.Lock()
-	defer c.Lock.Unlock()
+	//c.Lock.Lock()
+	//defer c.Lock.Unlock()
 
+	reply = &TaskInfo{}
 	id := args.TaskId
 	switch args.Tasktype {
 	case Map:
-		c.TaskMap[id-1].state = Idle
+		if c.MapTask[id].state != Finish {
+			c.MapTask[id].state = Idle
+		}
+
 	case Reduce:
-		c.ReduceMap[id-1] = Idle
+		if c.ReduceTask[id] != Finish {
+			c.ReduceTask[id] = Idle
+		}
 	}
 	return nil
 }
@@ -144,8 +186,8 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 
 func (c *Coordinator) Done() bool {
-	c.Lock.Lock()
-	defer c.Lock.Unlock()
+	//c.Lock.Lock()
+	//defer c.Lock.Unlock()
 
 	ret := false
 	if c.OK == true {
@@ -173,11 +215,11 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	ReduceMap := make([]int, nReduce)
 
 	c := Coordinator{
-		files:     files,
-		nReduce:   nReduce,
-		TaskMap:   TaskMapR,
-		ReduceMap: ReduceMap,
-		OK:        false,
+		files:      files,
+		nReduce:    nReduce,
+		MapTask:    TaskMapR,
+		ReduceTask: ReduceMap,
+		OK:         false,
 	}
 
 	// Your code here.
