@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"time"
 )
 import "log"
@@ -52,29 +53,31 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	// Your worker implementation here.
 
-	var TaskInfo = &TaskInfo{}
-	var Res = &Args{State: Idle} //初始化为idle状态
 	Ch := make(chan bool)
 	for {
-		GetTask(Res, TaskInfo)
+		var Res = &Args{State: Idle} //初始化为idle状态
+		var TaskInformation = &TaskInfo{}
+		GetTask(Res, TaskInformation)
 
 		//主任务结束后不再请求
-		if TaskInfo.TaskType == Over {
+		if TaskInformation.TaskType == Over {
 			break
 		}
-		fmt.Println("do it!")
-		go AssignAnother(Ch)
-		go DoTask(TaskInfo, mapf, reducef, Ch)
+		//fmt.Println("do it!")
+		go DoTask(TaskInformation, mapf, reducef, Ch)
 
 		sign := <-Ch
+		//fmt.Println("sign:", sign)
 
 		if sign == true {
-			Done(Res, TaskInfo)
-			fmt.Println("Finish one")
+			//fmt.Println("Finish one,ID:", TaskInformation.TaskId)
+			Done(Res, TaskInformation)
+
 		} else {
-			TaskInfo.Status = Idle
-			fmt.Println("err one")
-			call("Coordinator.Err", Res, &TaskInfo)
+			//TaskInformation.Status = Idle
+			//fmt.Println("err one,ID:", TaskInformation.TaskId)
+			call("Coordinator.Err", Res, TaskInformation)
+			Res = &Args{State: Idle}
 		}
 		time.Sleep(time.Second)
 	}
@@ -84,24 +87,32 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 }
 
-func GetTask(args *Args, TaskInfo *TaskInfo) {
+func GetTask(Args *Args, TaskInformation *TaskInfo) {
 	// 调用coordinator获取任务
 	for {
-		call("Coordinator.AssignTask", args, TaskInfo)
-		fmt.Println(TaskInfo)
-		if TaskInfo.Status != Idle {
+		call("Coordinator.AssignTask", Args, TaskInformation)
+		//fmt.Println(TaskInformation)
+
+		if TaskInformation.Status != Idle {
+			Args.State = Busy
+			Args.Tasktype = TaskInformation.TaskType
+			Args.TaskId = TaskInformation.TaskId
+			//fmt.Println("TaskInfo:", TaskInformation)
+			//fmt.Println("Args：", Args)
+			call("Coordinator.Verify", Args, TaskInformation)
 			break
 		}
+
 		time.Sleep(time.Second)
 	}
-	fmt.Printf("Type:%v,Id:%v\n", TaskInfo.TaskType, TaskInfo.TaskId)
+	//fmt.Printf("Type:%v,Id:%v\n", TaskInformation.TaskType, TaskInformation.TaskId)
 }
 
 func writeKVs(KVs []KeyValue, info *TaskInfo, fConts []*os.File) {
 	//fConts := make([]io.Writer, info.NReduce)
 	KVset := make([][]KeyValue, info.NReduce)
 
-	fmt.Println("start write")
+	//fmt.Println("start write")
 
 	//for j := 1; j <= info.NReduce; j++ {
 	//
@@ -134,20 +145,22 @@ func writeKVs(KVs []KeyValue, info *TaskInfo, fConts []*os.File) {
 
 		}
 	}
-	fmt.Println("finish write")
+	//fmt.Println("finish write")
 }
 
 func read(filename string) []byte {
-	fmt.Println("read", filename)
+	//fmt.Println("read", filename)
 	file, err := os.Open(filename)
+	defer file.Close()
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
+		fmt.Println(err)
 	}
 	content, err := io.ReadAll(file)
 	if err != nil {
 		log.Fatalf("cannot read %v", filename)
 	}
-	file.Close()
+
 	return content
 }
 
@@ -156,14 +169,14 @@ func read(filename string) []byte {
 func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(string, []string) string, Ch chan bool) {
 	//fConts := make([]io.Writer, info.NReduce)
 
-	fmt.Println("start", info.TaskId)
-
+	//fmt.Println("start", info.TaskId)
+	//go AssignAnother(Ch)
 	switch info.TaskType {
 	case Map:
 		info.FileContent = string(read(info.FileName))
 		//fmt.Println(info.FileContent)
 		KVs := mapf(info.FileName, info.FileContent.(string))
-
+		//fmt.Println("map:", KVs)
 		//将其排序
 		sort.Sort(ByKey(KVs))
 
@@ -172,7 +185,8 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 		//0-9
 		for j := 0; j < info.NReduce; j++ {
 
-			fileName := fmt.Sprintf("mr-%v-%v", info.TaskId, j)
+			//暂时名，完成后重命名
+			fileName := fmt.Sprintf("mr-%v-%v-test", info.TaskId, j)
 			//_, err := os.Create(fileName)
 			//if err != nil {
 			//	fmt.Println(err)
@@ -189,35 +203,51 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 				return
 			}
 
-			fmt.Println("creatfile:  ", fileName)
+			//fmt.Println("creatfile:  ", fileName)
 
 			//fConts[j] = f
 			fConts = append(fConts, f)
+			defer os.Rename(fileName, strings.TrimSuffix(fileName, "-test"))
 			defer f.Close()
 		}
 
 		writeKVs(KVs, info, fConts)
 
 	case Reduce:
-
-		fileOS, err := os.Create(fmt.Sprintf("mr-out-%v", info.TaskId))
+		fileName := fmt.Sprintf("testmr-out-%v", info.TaskId)
+		fileOS, err := os.Create(fileName)
+		//fmt.Println("create success")
 		if err != nil {
 			fmt.Println("Error creating file:", err)
 			return
 		}
+		defer os.Rename(fileName, strings.TrimPrefix(fileName, "test"))
 		defer fileOS.Close()
-		//读取文件
-		info.FileContent = read(info.FileName)
-
 		var KVs []KeyValue
-		var KVsRes []KeyValue
+		//读取文件
+		for i := 0; i < info.Nmap; i++ {
+			fileName := fmt.Sprintf("mr-%v-%v", i, info.TaskId)
+			//fmt.Println(fileName)
 
-		//解码为KVs
-		err = json.Unmarshal(info.FileContent.([]byte), &KVs)
-		if err != nil {
-			return
+			file, err := os.Open(fileName)
+			defer file.Close()
+			if err != nil {
+				fmt.Println(err)
+			}
+
+			dec := json.NewDecoder(file)
+
+			for {
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					break
+				}
+				//fmt.Println(kv)
+				KVs = append(KVs, kv)
+			}
 		}
-
+		//var KVsRes []KeyValue
+		sort.Sort(ByKey(KVs))
 		//整理并传输内容给reduce
 		i := 0
 		for i < len(KVs) {
@@ -230,12 +260,11 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 				values = append(values, KVs[k].Value)
 			}
 			// this is the correct format for each line of Reduce output.
-
+			output := reducef(KVs[i].Key, values)
 			//每个key对应的计数
-			value := reducef(KVs[i].Key, values)
-			KVsRes = append(KVsRes, KeyValue{KVs[i].Key, value})
+			//KVsRes = append(KVsRes, KeyValue{KVs[i].Key, output})
 
-			fmt.Fprintf(fileOS, "%v %v\n", KVs[i].Key, KVsRes)
+			fmt.Fprintf(fileOS, "%v %v\n", KVs[i].Key, output)
 
 			i = j
 		}
@@ -245,14 +274,17 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 
 }
 
-func Done(args *Args, info *TaskInfo) {
-	args.State = Finish
-	info.Status = Idle
-	call("Coordinator.WorkerDone", args, info)
+func Done(Arg *Args, Info *TaskInfo) {
+
+	//Info.Status = Idle
+	call("Coordinator.WorkerDone", Arg, Info)
+
+	//arg重新清空
+	Arg = &Args{State: Idle}
 }
 
 func AssignAnother(Ch chan bool) {
-	time.Sleep(10 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	Ch <- false
 }
@@ -294,15 +326,16 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	//fmt.Println("Worker is dialing", sockname)
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		//log.Fatal("dialing:", err)
+		return false
 	}
 	defer c.Close()
 
 	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
+	if err != nil {
+		//fmt.Println(err)
+		return false
 	}
 
-	fmt.Println(err)
-	return false
+	return true
 }
