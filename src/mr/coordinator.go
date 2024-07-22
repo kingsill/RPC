@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -70,7 +69,7 @@ func (c *Coordinator) AssignTask(Arg *Args, Reply *TaskInfo) error {
 				Reply.NReduce = c.nReduce // 设置 NReduce
 				Reply.Status = Busy
 				task.state = Busy
-				fmt.Println("map,Id:", i)
+				//fmt.Println("map,Id:", i)
 				return nil
 			}
 		}
@@ -78,7 +77,7 @@ func (c *Coordinator) AssignTask(Arg *Args, Reply *TaskInfo) error {
 		//Map完成后再Reduce
 		for _, task := range c.MapTask {
 			if task.state != Finish {
-				fmt.Println("等待Map完成")
+				//fmt.Println("等待Map完成")
 				return nil
 			}
 		}
@@ -87,7 +86,7 @@ func (c *Coordinator) AssignTask(Arg *Args, Reply *TaskInfo) error {
 
 		//分配Reduce
 		for i, v := range c.ReduceTask {
-			fmt.Println(c.ReduceTask)
+			//fmt.Println(c.ReduceTask)
 			if v == Idle {
 				Arg.Tasktype = Reduce
 				Arg.TaskId = i
@@ -97,8 +96,8 @@ func (c *Coordinator) AssignTask(Arg *Args, Reply *TaskInfo) error {
 				Reply.Status = Busy
 				Reply.Nmap = len(c.files)
 				c.ReduceTask[i] = Busy
-				fmt.Println(c.ReduceTask[i])
-				fmt.Println("reduce", i)
+				//fmt.Println(c.ReduceTask[i])
+				//fmt.Println("reduce", i)
 				return nil
 			}
 		}
@@ -178,7 +177,7 @@ func (c *Coordinator) server() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	fmt.Println("Coordinator is listening on", sockname)
+	//fmt.Println("Coordinator is listening on", sockname)
 	go http.Serve(l, nil)
 }
 
@@ -202,7 +201,7 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	fmt.Println(files)
+	//fmt.Println(files)
 	TaskMapR = make(map[int]*Task, len(files))
 
 	for i, file := range files {

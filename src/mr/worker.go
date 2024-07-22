@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"time"
 )
 import "log"
@@ -69,12 +70,12 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		//fmt.Println("sign:", sign)
 
 		if sign == true {
-			fmt.Println("Finish one,ID:", TaskInformation.TaskId)
+			//fmt.Println("Finish one,ID:", TaskInformation.TaskId)
 			Done(Res, TaskInformation)
 
 		} else {
 			//TaskInformation.Status = Idle
-			fmt.Println("err one,ID:", TaskInformation.TaskId)
+			//fmt.Println("err one,ID:", TaskInformation.TaskId)
 			call("Coordinator.Err", Res, TaskInformation)
 			Res = &Args{State: Idle}
 		}
@@ -104,7 +105,7 @@ func GetTask(Args *Args, TaskInformation *TaskInfo) {
 
 		time.Sleep(time.Second)
 	}
-	fmt.Printf("Type:%v,Id:%v\n", TaskInformation.TaskType, TaskInformation.TaskId)
+	//fmt.Printf("Type:%v,Id:%v\n", TaskInformation.TaskType, TaskInformation.TaskId)
 }
 
 func writeKVs(KVs []KeyValue, info *TaskInfo, fConts []*os.File) {
@@ -168,7 +169,7 @@ func read(filename string) []byte {
 func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(string, []string) string, Ch chan bool) {
 	//fConts := make([]io.Writer, info.NReduce)
 
-	fmt.Println("start", info.TaskId)
+	//fmt.Println("start", info.TaskId)
 	//go AssignAnother(Ch)
 	switch info.TaskType {
 	case Map:
@@ -184,7 +185,8 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 		//0-9
 		for j := 0; j < info.NReduce; j++ {
 
-			fileName := fmt.Sprintf("mr-%v-%v", info.TaskId, j)
+			//暂时名，完成后重命名
+			fileName := fmt.Sprintf("mr-%v-%v-test", info.TaskId, j)
 			//_, err := os.Create(fileName)
 			//if err != nil {
 			//	fmt.Println(err)
@@ -205,20 +207,23 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 
 			//fConts[j] = f
 			fConts = append(fConts, f)
+			defer os.Rename(fileName, strings.TrimSuffix(fileName, "-test"))
 			defer f.Close()
 		}
 
 		writeKVs(KVs, info, fConts)
 
 	case Reduce:
-
-		fileOS, err := os.Create(fmt.Sprintf("mr-out-%v", info.TaskId))
+		fileName := fmt.Sprintf("testmr-out-%v", info.TaskId)
+		fileOS, err := os.Create(fileName)
 		//fmt.Println("create success")
 		if err != nil {
 			fmt.Println("Error creating file:", err)
 			return
 		}
+		defer os.Rename(fileName, strings.TrimPrefix(fileName, "test"))
 		defer fileOS.Close()
+		var KVs []KeyValue
 		//读取文件
 		for i := 0; i < info.Nmap; i++ {
 			fileName := fmt.Sprintf("mr-%v-%v", i, info.TaskId)
@@ -231,7 +236,7 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 			}
 
 			dec := json.NewDecoder(file)
-			var KVs []KeyValue
+
 			for {
 				var kv KeyValue
 				if err := dec.Decode(&kv); err != nil {
@@ -240,30 +245,28 @@ func DoTask(info *TaskInfo, mapf func(string, string) []KeyValue, reducef func(s
 				//fmt.Println(kv)
 				KVs = append(KVs, kv)
 			}
-
-			var KVsRes []KeyValue
-
-			//整理并传输内容给reduce
-			i := 0
-			for i < len(KVs) {
-				j := i + 1
-				for j < len(KVs) && KVs[j].Key == KVs[i].Key {
-					j++
-				}
-				values := []string{}
-				for k := i; k < j; k++ {
-					values = append(values, KVs[k].Value)
-				}
-				// this is the correct format for each line of Reduce output.
-
-				//每个key对应的计数
-				value := reducef(KVs[i].Key, values)
-				KVsRes = append(KVsRes, KeyValue{KVs[i].Key, value})
-
-				fmt.Fprintf(fileOS, "%v %v\n", KVs[i].Key, KVsRes)
-
-				i = j
+		}
+		//var KVsRes []KeyValue
+		sort.Sort(ByKey(KVs))
+		//整理并传输内容给reduce
+		i := 0
+		for i < len(KVs) {
+			j := i + 1
+			for j < len(KVs) && KVs[j].Key == KVs[i].Key {
+				j++
 			}
+			values := []string{}
+			for k := i; k < j; k++ {
+				values = append(values, KVs[k].Value)
+			}
+			// this is the correct format for each line of Reduce output.
+			output := reducef(KVs[i].Key, values)
+			//每个key对应的计数
+			//KVsRes = append(KVsRes, KeyValue{KVs[i].Key, output})
+
+			fmt.Fprintf(fileOS, "%v %v\n", KVs[i].Key, output)
+
+			i = j
 		}
 
 	}
@@ -323,15 +326,16 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	//fmt.Println("Worker is dialing", sockname)
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		//log.Fatal("dialing:", err)
+		return false
 	}
 	defer c.Close()
 
 	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
+	if err != nil {
+		//fmt.Println(err)
+		return false
 	}
 
-	fmt.Println(err)
-	return false
+	return true
 }
