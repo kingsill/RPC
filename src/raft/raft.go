@@ -89,9 +89,6 @@ type Entries struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	// Your code here (3A).
 
 	return rf.currentTerm, rf.isLeader
@@ -165,56 +162,80 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	reply.Success = true
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
 	}
 
-	var entryTerm int
-
-	if len(rf.log) == 0 {
-		entryTerm = 0
-	} else {
-		entryTerm = rf.log[args.PrevLogIndex].Term
-	}
-	if args.PrevLogTerm == entryTerm {
-	}
-
 	//同步term
-	if args.Term >= rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.isLeader = false
-		rf.currentTerm = args.Term
-	}
-
+	rf.currentTerm = args.Term
+	rf.isLeader = false
 	//重置心跳时间
 	rf.lastRevTime = time.Now()
+	rf.votedFor = -1
 	DPrintf("%v成为follower,重置花费时间%v", rf.me, time.Since(rf.lastRevTime))
 
 }
 
 // TODO 什么时候发送AppendEntries
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	DPrintf("%v给%v发送AppendEntries", rf.me, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
+
+}
+
+type AppendEntriesResult struct {
+	Success bool
+	Number  int
 }
 
 // TODO 维持心跳。leader才有
 func (rf *Raft) HeartBeats() {
 	for rf.killed() == false {
 		for rf.isLeader == true {
+			resultCh := make(chan AppendEntriesResult, len(rf.peers)-1)
 			for i, _ := range rf.peers {
 				if i != rf.me {
-					args := &AppendEntriesArgs{
-						Term:     rf.currentTerm,
-						LeaderId: rf.me,
-					}
-					reply := &AppendEntriesReply{}
-					go rf.sendAppendEntries(i, args, reply)
+					go func(i int) {
+						args := &AppendEntriesArgs{
+							Term:     rf.currentTerm,
+							LeaderId: rf.me,
+						}
+						reply := &AppendEntriesReply{}
+
+						rf.sendAppendEntries(i, args, reply)
+
+						// 将 reply 的 success 状态发送到 channel 中
+						resultCh <- AppendEntriesResult{
+							Success: reply.Success,
+							Number:  reply.Term,
+						}
+					}(i)
+
 				}
 			}
-			time.Sleep(100 * time.Millisecond)
+			// 收集所有协程的结果
+			stop := false
+			for j := 0; j < len(rf.peers)-1; j++ {
+				result := <-resultCh
+				if !result.Success {
+					stop = true
+					DPrintf("%v恢复follower,", rf.me)
+					rf.mu.Lock()
+					rf.isLeader = false
+					rf.currentTerm = result.Number
+					rf.mu.Unlock()
+					break
+				}
+			}
+
+			if stop {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -367,7 +388,7 @@ func (rf *Raft) ticker() {
 			//超时
 			if time.Since(rf.lastRevTime) > rf.electedTimeOut {
 				DPrintf("%v超时", rf.me)
-				rf.startElection()
+				go rf.startElection()
 			}
 		}
 
@@ -375,14 +396,13 @@ func (rf *Raft) ticker() {
 		// milliseconds.
 		ms := 100 + (rand.Int63() % 500)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
-		rf.votedFor = -1
 	}
 }
 
 // TODO 选举
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	rf.lastRevTime = time.Now()
@@ -402,6 +422,8 @@ func (rf *Raft) startElection() {
 		args.LastLogIndex = rf.log[len(rf.log)-1].Index
 		args.LastLogTerm = rf.log[len(rf.log)-1].Term
 	}
+
+	rf.mu.Unlock()
 
 	c := make(chan bool)
 
@@ -441,9 +463,9 @@ func (rf *Raft) startElection() {
 			}
 		}
 	case <-time.After(1 * time.Second):
-		DPrintf("%v选举超时", rf.me)
+		DPrintf("%v选举超时或者不成功", rf.me)
 	}
-
+	rf.votedFor = -1
 }
 
 // TODO
