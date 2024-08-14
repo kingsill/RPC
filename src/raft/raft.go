@@ -23,7 +23,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 )
@@ -52,21 +51,23 @@ type ApplyMsg struct {
 // XXX 可能修改
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
-	isLeader  bool
-	timing    bool
+	mu             sync.Mutex          // Lock to protect shared access to this peer's state
+	peers          []*labrpc.ClientEnd // RPC end points of all peers
+	persister      *Persister          // Object to hold this peer's persisted state
+	me             int                 // this peer's index into peers[]
+	dead           int32               // set by Kill()
+	isLeader       bool
+	timing         bool
+	electedTimeOut time.Duration
+	lastRevTime    time.Time
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
 	//Persistent state
 	currentTerm int
-	votedFor    int   //candidateId that received vote in current term
-	log         []log //log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
+	votedFor    int       //candidateId that received vote in current term
+	log         []Entries //log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
 
 	//volatile on all server
 	committedIndex int
@@ -78,10 +79,10 @@ type Raft struct {
 }
 
 // entry的结构
-type log struct {
-	command string //command for state machine
-	term    int    //term when entry was received by leader (first index is 1)
-	index   int    //index of entry in log
+type Entries struct {
+	Command string //command for state machine
+	Term    int    //term when entry was received by leader (first index is 1)
+	Index   int    //index of entry in log
 }
 
 // XXX
@@ -91,14 +92,9 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	var term int
-	var isleader bool
 	// Your code here (3A).
 
-	term = rf.currentTerm
-	isleader = rf.isLeader
-
-	return term, isleader
+	return rf.currentTerm, rf.isLeader
 }
 
 // save Raft's persistent state to stable storage,
@@ -155,7 +151,7 @@ type AppendEntriesArgs struct {
 	PrevLogIndex int
 
 	PrevLogTerm  int
-	Entries      []log
+	Entries      []Entries
 	LeaderCommit int
 }
 
@@ -167,20 +163,61 @@ type AppendEntriesReply struct {
 
 // TODO AppendEntries
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	var entryTerm int
+
+	if len(rf.log) == 0 {
+		entryTerm = 0
+	} else {
+		entryTerm = rf.log[args.PrevLogIndex].Term
+	}
+	if args.PrevLogTerm == entryTerm {
+	}
+
+	//同步term
+	if args.Term >= rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.isLeader = false
+		rf.currentTerm = args.Term
+	}
+
+	//重置心跳时间
+	rf.lastRevTime = time.Now()
+	DPrintf("%v成为follower,重置花费时间%v", rf.me, time.Since(rf.lastRevTime))
 
 }
 
 // TODO 什么时候发送AppendEntries
-func (rf *Raft) check() {
-	for rf.killed() == false {
-		time.Sleep(100 * time.Millisecond)
-	}
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
 }
 
-// TODO
+// TODO 维持心跳。leader才有
 func (rf *Raft) HeartBeats() {
-	go rf.check()
-
+	for rf.killed() == false {
+		for rf.isLeader == true {
+			for i, _ := range rf.peers {
+				if i != rf.me {
+					args := &AppendEntriesArgs{
+						Term:     rf.currentTerm,
+						LeaderId: rf.me,
+					}
+					reply := &AppendEntriesReply{}
+					go rf.sendAppendEntries(i, args, reply)
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // XXX
@@ -210,32 +247,37 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	DPrintf("请求来自：%v，本机ID：%v,本机超时状态：%v", args, rf.me, time.Since(rf.lastRevTime))
+
 	if args.Term < rf.currentTerm {
+		DPrintf("%v过时", args.CandidateId)
 		reply.VoteGranted = false
+		reply.Term = args.Term
 		return
 	}
 
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+		DPrintf("已经投过票，%v", rf.votedFor)
 		reply.VoteGranted = false
 		return
 	}
 
-	switch args.LastLogTerm == rf.log[len(rf.log)-1].term {
-	case false:
-		if args.LastLogTerm > rf.log[len(rf.log)-1].term {
-			reply.VoteGranted = true
-			rf.votedFor = args.CandidateId
-			reply.Term = rf.currentTerm
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+		lastLogIndex := len(rf.log)
+		lastLogTerm := 0
+		if lastLogIndex > 0 {
+			lastLogTerm = rf.log[lastLogIndex-1].Term
 		}
-	case true:
-		if args.LastLogIndex > rf.log[len(rf.log)-1].index {
-			reply.VoteGranted = true
+
+		if (args.LastLogTerm > lastLogTerm) || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
 			rf.votedFor = args.CandidateId
-			reply.Term = rf.currentTerm
+			rf.currentTerm = args.Term
+			rf.lastRevTime = time.Now()
+			reply.VoteGranted = true
+			DPrintf("投票给%v", args.CandidateId)
 		}
 	}
-
-	return
+	reply.Term = rf.currentTerm
 }
 
 // TODO
@@ -267,11 +309,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	args.Term = rf.currentTerm
-	args.CandidateId = rf.me
-	args.LastLogIndex = rf.log[len(rf.log)-1].index
-	args.LastLogTerm = rf.log[len(rf.log)-1].term
-
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -317,18 +354,96 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-// TODO
+// TODO 开始选举的定时
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
 
-		// pause for a random amount of time between 150 and 300
+		//只有candidate和follower才能发起选举
+		if rf.isLeader != true {
+
+			//超时
+			if time.Since(rf.lastRevTime) > rf.electedTimeOut {
+				DPrintf("%v超时", rf.me)
+				rf.startElection()
+			}
+		}
+
+		// pause for a random amount of time between 150 and 500
 		// milliseconds.
-		ms := 150 + (rand.Int63() % 100)
+		ms := 100 + (rand.Int63() % 500)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
+		rf.votedFor = -1
 	}
+}
+
+// TODO 选举
+func (rf *Raft) startElection() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.currentTerm++
+	rf.votedFor = rf.me
+	rf.lastRevTime = time.Now()
+
+	sucNum := len(rf.peers) / 2
+	DPrintf("%v开始竞选，需要票数%v", rf, sucNum)
+	num := 0
+
+	args := &RequestVoteArgs{
+		Term:        rf.currentTerm,
+		CandidateId: rf.me,
+	}
+	if len(rf.log) == 0 {
+		args.LastLogIndex = 0
+		args.LastLogTerm = 0
+	} else {
+		args.LastLogIndex = rf.log[len(rf.log)-1].Index
+		args.LastLogTerm = rf.log[len(rf.log)-1].Term
+	}
+
+	c := make(chan bool)
+
+	for i, _ := range rf.peers {
+		if i != rf.me {
+			i := i
+			DPrintf("请求%v投票", i)
+			reply := &RequestVoteReply{}
+
+			go func() {
+
+				rf.sendRequestVote(i, args, reply)
+
+				if reply.VoteGranted {
+					num++
+				} else if reply.Term > rf.currentTerm { //如果没有被投票且发现自己的term过时
+					rf.isLeader = false
+					//结束选举，回退到follower（只要不开始选举就是follower，这里一直占据锁）
+				}
+				DPrintf("%v当前票数:%v", rf.me, num)
+				if num >= sucNum {
+					rf.isLeader = true
+					DPrintf("%v成功", rf.me)
+					c <- true
+				}
+			}()
+		}
+	}
+
+	select {
+	case <-c:
+		for i, _ := range rf.peers {
+			if i != rf.me {
+				args := &AppendEntriesArgs{}
+				reply := &AppendEntriesReply{}
+				go rf.sendAppendEntries(i, args, reply)
+			}
+		}
+	case <-time.After(1 * time.Second):
+		DPrintf("%v选举超时", rf.me)
+	}
+
 }
 
 // TODO
@@ -348,6 +463,12 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.votedFor = -1
+
+	//设定心跳超时时间
+	rf.electedTimeOut = time.Millisecond * 500
+	//初始化为设置当前时间
+	rf.lastRevTime = time.Now()
 
 	// Your initialization code here (3A, 3B, 3C).
 
@@ -355,7 +476,10 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	go rf.ticker()
+
+	go rf.ticker() //RequestVote RPC
+
+	go rf.HeartBeats()
 
 	return rf
 }
