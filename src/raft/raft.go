@@ -90,6 +90,8 @@ type Entries struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (3A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
 	return rf.currentTerm, rf.isLeader
 }
@@ -163,7 +165,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Success = true
+
+	//判断是否leader过时
 	if args.Term < rf.currentTerm {
+		DPrintf("ID:%v,leader过时", args.LeaderId)
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
@@ -172,14 +177,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//同步term
 	rf.currentTerm = args.Term
 	rf.isLeader = false
-	//重置心跳时间
+	//重置心跳时间和是否投票
 	rf.lastRevTime = time.Now()
 	rf.votedFor = -1
-	DPrintf("%v成为follower,重置花费时间%v", rf.me, time.Since(rf.lastRevTime))
-
+	DPrintf("%v成为follower", rf.me)
 }
 
-// TODO 什么时候发送AppendEntries
+// XXX 什么时候发送AppendEntries
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	DPrintf("%v给%v发送AppendEntries", rf.me, server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
@@ -192,17 +196,24 @@ type AppendEntriesResult struct {
 	Number  int
 }
 
-// TODO 维持心跳。leader才有
+// XXX 维持心跳。leader才有
 func (rf *Raft) HeartBeats() {
 	for rf.killed() == false {
 		for rf.isLeader == true {
-			resultCh := make(chan AppendEntriesResult, len(rf.peers)-1)
-			for i, _ := range rf.peers {
-				if i != rf.me {
+			rf.mu.Lock()
+			nums := len(rf.peers) - 1
+			resultCh := make(chan AppendEntriesResult, nums)
+			peers := rf.peers
+			me := rf.me
+			currentTerm := rf.currentTerm
+			rf.mu.Unlock()
+
+			for i, _ := range peers {
+				if i != me {
 					go func(i int) {
 						args := &AppendEntriesArgs{
-							Term:     rf.currentTerm,
-							LeaderId: rf.me,
+							Term:     currentTerm,
+							LeaderId: me,
 						}
 						reply := &AppendEntriesReply{}
 
@@ -219,14 +230,15 @@ func (rf *Raft) HeartBeats() {
 			}
 			// 收集所有协程的结果
 			stop := false
-			for j := 0; j < len(rf.peers)-1; j++ {
+			for j := 0; j < nums; j++ {
 				result := <-resultCh
-				if !result.Success {
+				if !result.Success { //说明自己的term小于被请求对象
 					stop = true
 					DPrintf("%v恢复follower,", rf.me)
 					rf.mu.Lock()
 					rf.isLeader = false
-					rf.currentTerm = result.Number
+					rf.currentTerm = max(result.Number, rf.currentTerm)
+					rf.lastRevTime = time.Now()
 					rf.mu.Unlock()
 					break
 				}
@@ -235,9 +247,9 @@ func (rf *Raft) HeartBeats() {
 			if stop {
 				break
 			}
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -261,47 +273,48 @@ type RequestVoteReply struct {
 	VoteGranted bool //true means candidate received vote
 }
 
-// TODO
+// XXX
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("请求来自：%v，本机ID：%v,本机超时状态：%v", args, rf.me, time.Since(rf.lastRevTime))
+	//在接到投票请求是是否刷新心跳超时
+	//rf.lastRevTime = time.Now()
 
+	DPrintf("请求来自：%v,term:%v，本机ID：%v,本机当前term：%v", args.CandidateId, args.Term, rf.me, rf.currentTerm)
+	//如果candidate的term小于当前的term，返回false，并且告知candidate当前的term
+	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
 		DPrintf("%v过时", args.CandidateId)
 		reply.VoteGranted = false
-		reply.Term = args.Term
 		return
 	}
 
+	//如果term没问题，判断是否已经投过票
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		DPrintf("已经投过票，%v", rf.votedFor)
 		reply.VoteGranted = false
 		return
 	}
 
-	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		lastLogIndex := len(rf.log)
-		lastLogTerm := 0
-		if lastLogIndex > 0 {
-			lastLogTerm = rf.log[lastLogIndex-1].Term
-		}
-
-		if (args.LastLogTerm > lastLogTerm) || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
-			rf.votedFor = args.CandidateId
-			rf.currentTerm = args.Term
-			rf.lastRevTime = time.Now()
-			reply.VoteGranted = true
-			DPrintf("投票给%v", args.CandidateId)
-		}
+	lastLogIndex := rf.committedIndex
+	lastLogTerm := 0
+	if lastLogIndex > 0 {
+		lastLogTerm = rf.log[lastLogIndex].Term
 	}
-	reply.Term = rf.currentTerm
+
+	//判断日志新旧
+	if (args.LastLogTerm > lastLogTerm) || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
+		rf.votedFor = args.CandidateId
+
+		reply.VoteGranted = true
+		DPrintf("投票给%v", args.CandidateId)
+	}
 }
 
-// TODO
+// XXX
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -375,7 +388,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-// TODO 开始选举的定时
+// XXX 开始选举的定时
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
@@ -383,70 +396,72 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 
 		//只有candidate和follower才能发起选举
+
 		if rf.isLeader != true {
 
 			//超时
 			if time.Since(rf.lastRevTime) > rf.electedTimeOut {
-				DPrintf("%v超时", rf.me)
-				go rf.startElection()
+				DPrintf("%v超时,开始选举", rf.me)
+				rf.startElection()
 			}
 		}
-
 		// pause for a random amount of time between 150 and 500
 		// milliseconds.
-		ms := 100 + (rand.Int63() % 500)
+		ms := 150 + (rand.Int63() % 150)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
-// TODO 选举
+// XXX 选举
 func (rf *Raft) startElection() {
+	var LastLogIndex, LastLogTerm int
+	//首先对rf进行读取
 	rf.mu.Lock()
-
 	rf.currentTerm++
+	currentTerm := rf.currentTerm
 	rf.votedFor = rf.me
-	rf.lastRevTime = time.Now()
-
 	sucNum := len(rf.peers) / 2
-	DPrintf("%v开始竞选，需要票数%v", rf, sucNum)
+	candidateID := rf.me
+	if len(rf.log) == 0 {
+		LastLogIndex = 0
+		LastLogTerm = 0
+	} else {
+		LastLogIndex = rf.log[len(rf.log)-1].Index
+		LastLogTerm = rf.log[len(rf.log)-1].Term
+	}
+	peers := rf.peers
+	rf.mu.Unlock()
+
+	DPrintf("ID:%v;Term:%v开始竞选，需要票数%v", candidateID, currentTerm, sucNum)
 	num := 0
 
 	args := &RequestVoteArgs{
-		Term:        rf.currentTerm,
-		CandidateId: rf.me,
+		Term:         currentTerm,
+		CandidateId:  candidateID,
+		LastLogIndex: LastLogIndex,
+		LastLogTerm:  LastLogTerm,
 	}
-	if len(rf.log) == 0 {
-		args.LastLogIndex = 0
-		args.LastLogTerm = 0
-	} else {
-		args.LastLogIndex = rf.log[len(rf.log)-1].Index
-		args.LastLogTerm = rf.log[len(rf.log)-1].Term
-	}
-
-	rf.mu.Unlock()
 
 	c := make(chan bool)
 
-	for i, _ := range rf.peers {
-		if i != rf.me {
+	for i, _ := range peers {
+		if i != candidateID {
 			i := i
 			DPrintf("请求%v投票", i)
 			reply := &RequestVoteReply{}
-
 			go func() {
 
 				rf.sendRequestVote(i, args, reply)
 
 				if reply.VoteGranted {
 					num++
-				} else if reply.Term > rf.currentTerm { //如果没有被投票且发现自己的term过时
-					rf.isLeader = false
+				} else if reply.Term > currentTerm { //如果没有被投票且发现自己的term过时
+					currentTerm = reply.Term
+					DPrintf("candidate %v 发现自己不配当candidate", candidateID)
 					//结束选举，回退到follower（只要不开始选举就是follower，这里一直占据锁）
 				}
-				DPrintf("%v当前票数:%v", rf.me, num)
+				DPrintf("%v当前票数:%v", candidateID, num)
 				if num >= sucNum {
-					rf.isLeader = true
-					DPrintf("%v成功", rf.me)
 					c <- true
 				}
 			}()
@@ -455,17 +470,27 @@ func (rf *Raft) startElection() {
 
 	select {
 	case <-c:
-		for i, _ := range rf.peers {
-			if i != rf.me {
-				args := &AppendEntriesArgs{}
+		rf.mu.Lock()
+		rf.isLeader = true
+		rf.mu.Unlock()
+		DPrintf("%v成功,当前term%v", candidateID, currentTerm)
+		for i, _ := range peers {
+			if i != candidateID {
+				args := &AppendEntriesArgs{Term: currentTerm,
+					LeaderId: candidateID}
 				reply := &AppendEntriesReply{}
 				go rf.sendAppendEntries(i, args, reply)
 			}
 		}
-	case <-time.After(1 * time.Second):
-		DPrintf("%v选举超时或者不成功", rf.me)
+	case <-time.After(50 * time.Millisecond):
+		//rf.mu.Lock()
+		//rf.currentTerm--
+		//rf.mu.Unlock()
+		DPrintf("%v选举超时或者不成功", candidateID)
 	}
+	rf.mu.Lock()
 	rf.votedFor = -1
+	rf.mu.Unlock()
 }
 
 // TODO
@@ -488,7 +513,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister,
 	rf.votedFor = -1
 
 	//设定心跳超时时间
-	rf.electedTimeOut = time.Millisecond * 500
+	rf.electedTimeOut = time.Millisecond * 300
 	//初始化为设置当前时间
 	rf.lastRevTime = time.Now()
 
