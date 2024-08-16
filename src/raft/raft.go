@@ -27,6 +27,7 @@ import (
 	"6.5840/labrpc"
 )
 
+// XXX ApplyMsg
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
@@ -85,7 +86,6 @@ type Entries struct {
 	Index   int    //index of entry in log
 }
 
-// XXX
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -143,18 +143,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// XXX
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
-	PrevLogIndex int
+	PrevLogIndex int //新的entry之前的一个entry的index
 
-	PrevLogTerm  int
-	Entries      []Entries
+	PrevLogTerm  int       //PrevLogIndex对应的entry的term
+	Entries      []Entries //新的entry，不是全部的，为了效率可能传多个
 	LeaderCommit int
 }
 
-// XXX
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
@@ -174,6 +172,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	//log中第一个entry的Index
+	iniIndex := rf.log[0].Index
+	//推算prevLogIndex对应的entry的实际log位置
+	order := args.PrevLogIndex - iniIndex
+	//entry不为空，说明是正式的leader发送的有消息的心跳，否则为上位宣称
+	if args.Entries != nil {
+		//检查prevLogIndex
+		if order < 0 || rf.log[order].Term != args.PrevLogTerm {
+			reply.Success = false
+			return
+		}
+	}
+
+	//修剪log
+	rf.log = append(rf.log[:order+1], args.Entries...)
+
+	//修改commitedIndex
+	if args.LeaderCommit > rf.committedIndex {
+		rf.committedIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
+	}
+
 	//同步term
 	rf.currentTerm = args.Term
 	rf.isLeader = false
@@ -185,23 +204,48 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 // XXX 什么时候发送AppendEntries
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	DPrintf("%v给%v发送AppendEntries", rf.me, server)
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+	/*	DPrintf("%v给%v发送AppendEntries", rf.me, server)
 
+		tim := make(chan bool)
+
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			tim <- false
+		}()
+		tim <- rf.peers[server].Call("Raft.AppendEntries", args, reply)
+
+		return <-tim*/
+	DPrintf("%v给%v发送AppendEntries", rf.me, server)
+
+	// 创建一个结果通道
+	resultChan := make(chan bool)
+
+	// 启动一个Goroutine进行RPC调用
+	go func() {
+		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+		resultChan <- ok
+	}()
+
+	select {
+	case result := <-resultChan:
+		return result // RPC调用成功，返回结果
+	case <-time.After(10 * time.Millisecond):
+		return false // 超时，返回false
+	}
 }
 
 type AppendEntriesResult struct {
 	Success bool
 	Number  int
+	TimeOut bool
 }
 
-// XXX 维持心跳。leader才有
+// TODO 维持心跳。leader才有
 func (rf *Raft) HeartBeats() {
 	for rf.killed() == false {
 		for rf.isLeader == true {
 			rf.mu.Lock()
-			nums := len(rf.peers) - 1
+			nums := len(rf.peers)
 			resultCh := make(chan AppendEntriesResult, nums)
 			peers := rf.peers
 			me := rf.me
@@ -217,10 +261,11 @@ func (rf *Raft) HeartBeats() {
 						}
 						reply := &AppendEntriesReply{}
 
-						rf.sendAppendEntries(i, args, reply)
+						ok := rf.sendAppendEntries(i, args, reply)
 
 						// 将 reply 的 success 状态发送到 channel 中
 						resultCh <- AppendEntriesResult{
+							TimeOut: ok,
 							Success: reply.Success,
 							Number:  reply.Term,
 						}
@@ -230,7 +275,8 @@ func (rf *Raft) HeartBeats() {
 			}
 			// 收集所有协程的结果
 			stop := false
-			for j := 0; j < nums; j++ {
+			count := 0
+			for j := 0; j < nums-1; j++ {
 				result := <-resultCh
 				if !result.Success { //说明自己的term小于被请求对象
 					stop = true
@@ -241,6 +287,11 @@ func (rf *Raft) HeartBeats() {
 					rf.lastRevTime = time.Now()
 					rf.mu.Unlock()
 					break
+				}
+				count++
+				//大多数收到append，则改当前entru为commited
+				if count > nums/2-1 {
+
 				}
 			}
 
@@ -253,7 +304,6 @@ func (rf *Raft) HeartBeats() {
 	}
 }
 
-// XXX
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
@@ -264,7 +314,6 @@ type RequestVoteArgs struct {
 	LastLogTerm  int //term of candidate's last log entry
 }
 
-// XXX
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
@@ -273,7 +322,7 @@ type RequestVoteReply struct {
 	VoteGranted bool //true means candidate received vote
 }
 
-// XXX
+// XXX 投票限制
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
@@ -314,7 +363,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 
-// XXX
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -347,6 +395,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+// TODO Start
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -359,14 +408,31 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	index = 1
+	if len(rf.log) != 0 {
+		index = rf.log[len(rf.log)-1].Index + 1
+	}
+	isLeader = rf.isLeader
+	term = rf.currentTerm
 
+	if !isLeader {
+		return
+	}
+
+	entry := Entries{
+		Command: command.(string),
+		Index:   index,
+		Term:    term,
+	}
+
+	//将新的entry加入log
+	rf.log = append(rf.log, entry)
 	// Your code here (3B).
 
-	return index, term, isLeader
+	return
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -493,7 +559,13 @@ func (rf *Raft) startElection() {
 	rf.mu.Unlock()
 }
 
-// TODO
+func (rf *Raft) apply(applyCh chan ApplyMsg) {
+	for rf.killed() == false {
+
+	}
+}
+
+// TODO Make
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -506,16 +578,16 @@ func (rf *Raft) startElection() {
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister,
 	applyCh chan ApplyMsg) *Raft {
 
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-	rf.votedFor = -1
-
-	//设定心跳超时时间
-	rf.electedTimeOut = time.Millisecond * 300
-	//初始化为设置当前时间
-	rf.lastRevTime = time.Now()
+	rf := &Raft{
+		peers:          peers,
+		persister:      persister,
+		me:             me,
+		votedFor:       -1,
+		electedTimeOut: time.Millisecond * 300, //设定心跳超时时间,开始选举
+		lastRevTime:    time.Now(),             //初始化为设置当前时间
+		currentTerm:    0,
+		isLeader:       false,
+	}
 
 	// Your initialization code here (3A, 3B, 3C).
 
@@ -527,6 +599,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister,
 	go rf.ticker() //RequestVote RPC
 
 	go rf.HeartBeats()
+
+	go rf.apply(applyCh)
 
 	return rf
 }
