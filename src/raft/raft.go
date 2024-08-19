@@ -173,7 +173,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	//log中第一个entry的Index
-	iniIndex := rf.log[0].Index
+	iniIndex := 0
+	if rf.log != nil {
+		iniIndex = rf.log[0].Index
+	}
 	//推算prevLogIndex对应的entry的实际log位置
 	order := args.PrevLogIndex - iniIndex
 	//entry不为空，说明是正式的leader发送的有消息的心跳，否则为上位宣称
@@ -183,14 +186,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Success = false
 			return
 		}
-	}
+		//修剪log
+		if rf.log != nil {
+			rf.log = append(rf.log[:order], args.Entries...)
+		} else {
+			rf.log = args.Entries
+		}
 
-	//修剪log
-	rf.log = append(rf.log[:order+1], args.Entries...)
-
-	//修改commitedIndex
-	if args.LeaderCommit > rf.committedIndex {
-		rf.committedIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
+		//修改commitedIndex
+		if args.LeaderCommit > rf.committedIndex {
+			rf.committedIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
+		}
 	}
 
 	//同步term
@@ -228,6 +234,16 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 	select {
 	case result := <-resultChan:
+		//成功的话更新matchindex表
+		if reply.Success && args.Entries != nil {
+			if args.Entries != nil {
+				rf.matchIndex[server] = args.Entries[len(args.Entries)-1].Index
+				rf.nextIndex[server] = args.Entries[len(args.Entries)-1].Index + 1
+			}
+		} else {
+			rf.nextIndex[server]--
+		}
+
 		return result // RPC调用成功，返回结果
 	case <-time.After(10 * time.Millisecond):
 		return false // 超时，返回false
@@ -250,15 +266,33 @@ func (rf *Raft) HeartBeats() {
 			peers := rf.peers
 			me := rf.me
 			currentTerm := rf.currentTerm
+			matchIndex := rf.matchIndex
+			entries := rf.log
+			leaderCommit := rf.committedIndex
+
+			iniIndex := 0
+			if entries != nil {
+				iniIndex = rf.log[0].Index
+			}
+
 			rf.mu.Unlock()
 
 			for i, _ := range peers {
 				if i != me {
 					go func(i int) {
+
 						args := &AppendEntriesArgs{
-							Term:     currentTerm,
-							LeaderId: me,
+							Term:         currentTerm,
+							LeaderId:     me,
+							PrevLogIndex: matchIndex[i],
+							Entries:      entries[matchIndex[i]-iniIndex:],
+							LeaderCommit: leaderCommit,
 						}
+						prevLogTerm := 0
+						if entries != nil {
+							prevLogTerm = entries[matchIndex[i]-iniIndex].Term
+						}
+						args.PrevLogTerm = prevLogTerm
 						reply := &AppendEntriesReply{}
 
 						ok := rf.sendAppendEntries(i, args, reply)
@@ -413,7 +447,9 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	defer rf.mu.Unlock()
 	index = 1
 	if len(rf.log) != 0 {
-		index = rf.log[len(rf.log)-1].Index + 1
+		//index = rf.log[len(rf.log)-1].Index + 1
+		index = rf.nextIndex[rf.me]
+		rf.nextIndex[rf.me]++
 	}
 	isLeader = rf.isLeader
 	term = rf.currentTerm
@@ -430,6 +466,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 
 	//将新的entry加入log
 	rf.log = append(rf.log, entry)
+	rf.matchIndex[rf.me]++
 	// Your code here (3B).
 
 	return
@@ -538,7 +575,16 @@ func (rf *Raft) startElection() {
 	case <-c:
 		rf.mu.Lock()
 		rf.isLeader = true
+		lastLogIndex := 0
+		if rf.log != nil {
+			lastLogIndex = rf.log[len(rf.log)].Index + 1
+		}
+
+		for i, _ := range rf.nextIndex {
+			rf.nextIndex[i] = lastLogIndex
+		}
 		rf.mu.Unlock()
+
 		DPrintf("%v成功,当前term%v", candidateID, currentTerm)
 		for i, _ := range peers {
 			if i != candidateID {
@@ -560,9 +606,42 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) apply(applyCh chan ApplyMsg) {
-	for rf.killed() == false {
+	for rf.killed() == false && rf.isLeader {
+		rf.mu.Lock()
 
+		committedIndex := rf.committedIndex
+		matchIndex := rf.matchIndex
+		th := len(rf.peers) / 2
+		rf.mu.Unlock()
+
+		counts := 0
+
+		for _, v := range matchIndex {
+			if v > committedIndex {
+				counts++
+			}
+		}
+
+		applyMsg := ApplyMsg{
+			CommandValid: true,
+			//Command:      rf.log[committedIndex].Command,
+			CommandIndex: committedIndex + 1,
+		}
+
+		if counts >= th {
+			rf.mu.Lock()
+			rf.committedIndex++
+
+			initIndex := rf.log[0].Index
+			applyMsg.Command = rf.log[committedIndex+1-initIndex]
+			rf.mu.Unlock()
+		}
+
+		applyCh <- applyMsg
+
+		time.Sleep(10 * time.Millisecond)
 	}
+	time.Sleep(50 * time.Millisecond)
 }
 
 // TODO Make
@@ -578,6 +657,9 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister,
 	applyCh chan ApplyMsg) *Raft {
 
+	nextIndex := make([]int, len(peers))
+	matchIndex := make([]int, len(peers))
+
 	rf := &Raft{
 		peers:          peers,
 		persister:      persister,
@@ -587,6 +669,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister,
 		lastRevTime:    time.Now(),             //初始化为设置当前时间
 		currentTerm:    0,
 		isLeader:       false,
+		nextIndex:      nextIndex,
+		matchIndex:     matchIndex,
 	}
 
 	// Your initialization code here (3A, 3B, 3C).
