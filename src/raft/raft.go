@@ -81,9 +81,9 @@ type Raft struct {
 
 // entry的结构
 type Entries struct {
-	Command string //command for state machine
-	Term    int    //term when entry was received by leader (first index is 1)
-	Index   int    //index of entry in log
+	Command interface{} //command for state machine
+	Term    int         //term when entry was received by leader (first index is 1)
+	Index   int         //index of entry in log
 }
 
 // return currentTerm and whether this server
@@ -166,31 +166,35 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	//判断是否leader过时
 	if args.Term < rf.currentTerm {
-		DPrintf("ID:%v,leader过时", args.LeaderId)
+		//DPrintf("ID:%v,leader过时", args.LeaderId)
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
 	}
 
-	//log中第一个entry的Index
-	iniIndex := 0
-	if rf.log != nil {
-		iniIndex = rf.log[0].Index
-	}
-	//推算prevLogIndex对应的entry的实际log位置
-	order := args.PrevLogIndex - iniIndex
 	//entry不为空，说明是正式的leader发送的有消息的心跳，否则为上位宣称
-	if args.Entries != nil {
-		//检查prevLogIndex
-		if order < 0 || rf.log[order].Term != args.PrevLogTerm {
-			reply.Success = false
-			return
-		}
-		//修剪log
-		if rf.log != nil {
-			rf.log = append(rf.log[:order], args.Entries...)
-		} else {
-			rf.log = args.Entries
+	if len(args.Entries) != 0 {
+		DPrintf("收到有效内容")
+		//log中第一个entry的Index
+		iniIndex := 0
+		if len(rf.log) != 0 {
+			iniIndex = rf.log[0].Index
+			//推算prevLogIndex对应的entry的实际log位置
+			order := args.PrevLogIndex - iniIndex
+			//检查prevLogIndex
+			if order < 0 || rf.log[order].Term != args.PrevLogTerm {
+				reply.Success = false
+				return
+			}
+			//修剪log
+			if len(rf.log) != 0 {
+				rf.log = append(rf.log[:order], args.Entries...)
+				DPrintf("received")
+			} else {
+				rf.log = args.Entries
+				DPrintf("received")
+
+			}
 		}
 
 		//修改commitedIndex
@@ -205,7 +209,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//重置心跳时间和是否投票
 	rf.lastRevTime = time.Now()
 	rf.votedFor = -1
-	DPrintf("%v成为follower", rf.me)
+	//DPrintf("%v成为follower", rf.me)
 }
 
 // XXX 什么时候发送AppendEntries
@@ -221,7 +225,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		tim <- rf.peers[server].Call("Raft.AppendEntries", args, reply)
 
 		return <-tim*/
-	DPrintf("%v给%v发送AppendEntries", rf.me, server)
+	//DPrintf("%v给%v发送AppendEntries", rf.me, server)
 
 	// 创建一个结果通道
 	resultChan := make(chan bool)
@@ -235,13 +239,13 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	select {
 	case result := <-resultChan:
 		//成功的话更新matchindex表
-		if reply.Success && args.Entries != nil {
-			if args.Entries != nil {
+		if reply.Success {
+			if len(args.Entries) != 0 {
 				rf.matchIndex[server] = args.Entries[len(args.Entries)-1].Index
 				rf.nextIndex[server] = args.Entries[len(args.Entries)-1].Index + 1
+			} else {
+				rf.nextIndex[server]--
 			}
-		} else {
-			rf.nextIndex[server]--
 		}
 
 		return result // RPC调用成功，返回结果
@@ -265,32 +269,45 @@ func (rf *Raft) HeartBeats() {
 			resultCh := make(chan AppendEntriesResult, nums)
 			peers := rf.peers
 			me := rf.me
+			DPrintf("me:%v", me)
 			currentTerm := rf.currentTerm
 			matchIndex := rf.matchIndex
+
+			DPrintf("matchIndex:%v", matchIndex)
+
+			commitedIndex := rf.committedIndex
 			entries := rf.log
 			leaderCommit := rf.committedIndex
 
 			iniIndex := 0
-			if entries != nil {
-				iniIndex = rf.log[0].Index
+			if len(entries) != 0 {
+				iniIndex = entries[0].Index
 			}
-
 			rf.mu.Unlock()
+			DPrintf("entries:%v", entries)
 
 			for i, _ := range peers {
 				if i != me {
 					go func(i int) {
-
 						args := &AppendEntriesArgs{
 							Term:         currentTerm,
 							LeaderId:     me,
 							PrevLogIndex: matchIndex[i],
-							Entries:      entries[matchIndex[i]-iniIndex:],
 							LeaderCommit: leaderCommit,
 						}
+						if matchIndex[me] > commitedIndex && len(entries) != 0 {
+							if len(entries) == 1 {
+								args.Entries = entries
+							} else {
+								args.Entries = entries[matchIndex[i]-iniIndex:]
+							}
+							DPrintf("Entries:%v", args.Entries)
+						}
+
 						prevLogTerm := 0
-						if entries != nil {
-							prevLogTerm = entries[matchIndex[i]-iniIndex].Term
+
+						if len(entries) != 0 {
+							prevLogTerm = entries[matchIndex[me]-iniIndex].Term
 						}
 						args.PrevLogTerm = prevLogTerm
 						reply := &AppendEntriesReply{}
@@ -309,23 +326,18 @@ func (rf *Raft) HeartBeats() {
 			}
 			// 收集所有协程的结果
 			stop := false
-			count := 0
+
 			for j := 0; j < nums-1; j++ {
 				result := <-resultCh
-				if !result.Success { //说明自己的term小于被请求对象
+				if !result.Success && result.TimeOut { //说明自己的term小于被请求对象
 					stop = true
-					DPrintf("%v恢复follower,", rf.me)
+					//DPrintf("%v恢复follower,", rf.me)
 					rf.mu.Lock()
 					rf.isLeader = false
 					rf.currentTerm = max(result.Number, rf.currentTerm)
 					rf.lastRevTime = time.Now()
 					rf.mu.Unlock()
 					break
-				}
-				count++
-				//大多数收到append，则改当前entru为commited
-				if count > nums/2-1 {
-
 				}
 			}
 
@@ -366,18 +378,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//在接到投票请求是是否刷新心跳超时
 	//rf.lastRevTime = time.Now()
 
-	DPrintf("请求来自：%v,term:%v，本机ID：%v,本机当前term：%v", args.CandidateId, args.Term, rf.me, rf.currentTerm)
+	//DPrintf("请求来自：%v,term:%v，本机ID：%v,本机当前term：%v", args.CandidateId, args.Term, rf.me, rf.currentTerm)
 	//如果candidate的term小于当前的term，返回false，并且告知candidate当前的term
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
-		DPrintf("%v过时", args.CandidateId)
+		//DPrintf("%v过时", args.CandidateId)
 		reply.VoteGranted = false
 		return
 	}
 
 	//如果term没问题，判断是否已经投过票
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
-		DPrintf("已经投过票，%v", rf.votedFor)
+		//DPrintf("已经投过票，%v", rf.votedFor)
 		reply.VoteGranted = false
 		return
 	}
@@ -393,7 +405,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 
 		reply.VoteGranted = true
-		DPrintf("投票给%v", args.CandidateId)
+		//DPrintf("投票给%v", args.CandidateId)
 	}
 }
 
@@ -459,7 +471,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	}
 
 	entry := Entries{
-		Command: command.(string),
+		Command: command,
 		Index:   index,
 		Term:    term,
 	}
@@ -468,7 +480,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	rf.log = append(rf.log, entry)
 	rf.matchIndex[rf.me]++
 	// Your code here (3B).
-
+	DPrintf("收到消息")
 	return
 }
 
@@ -504,7 +516,7 @@ func (rf *Raft) ticker() {
 
 			//超时
 			if time.Since(rf.lastRevTime) > rf.electedTimeOut {
-				DPrintf("%v超时,开始选举", rf.me)
+				//DPrintf("%v超时,开始选举", rf.me)
 				rf.startElection()
 			}
 		}
@@ -535,7 +547,7 @@ func (rf *Raft) startElection() {
 	peers := rf.peers
 	rf.mu.Unlock()
 
-	DPrintf("ID:%v;Term:%v开始竞选，需要票数%v", candidateID, currentTerm, sucNum)
+	//DPrintf("ID:%v;Term:%v开始竞选，需要票数%v", candidateID, currentTerm, sucNum)
 	num := 0
 
 	args := &RequestVoteArgs{
@@ -550,7 +562,7 @@ func (rf *Raft) startElection() {
 	for i, _ := range peers {
 		if i != candidateID {
 			i := i
-			DPrintf("请求%v投票", i)
+			//DPrintf("请求%v投票", i)
 			reply := &RequestVoteReply{}
 			go func() {
 
@@ -560,10 +572,10 @@ func (rf *Raft) startElection() {
 					num++
 				} else if reply.Term > currentTerm { //如果没有被投票且发现自己的term过时
 					currentTerm = reply.Term
-					DPrintf("candidate %v 发现自己不配当candidate", candidateID)
+					//DPrintf("candidate %v 发现自己不配当candidate", candidateID)
 					//结束选举，回退到follower（只要不开始选举就是follower，这里一直占据锁）
 				}
-				DPrintf("%v当前票数:%v", candidateID, num)
+				//DPrintf("%v当前票数:%v", candidateID, num)
 				if num >= sucNum {
 					c <- true
 				}
@@ -576,7 +588,8 @@ func (rf *Raft) startElection() {
 		rf.mu.Lock()
 		rf.isLeader = true
 		lastLogIndex := 0
-		if rf.log != nil {
+		if len(rf.log) != 0 {
+			//DPrintf("%v", rf.log)
 			lastLogIndex = rf.log[len(rf.log)].Index + 1
 		}
 
@@ -585,7 +598,7 @@ func (rf *Raft) startElection() {
 		}
 		rf.mu.Unlock()
 
-		DPrintf("%v成功,当前term%v", candidateID, currentTerm)
+		//DPrintf("%v成功,当前term%v", candidateID, currentTerm)
 		for i, _ := range peers {
 			if i != candidateID {
 				args := &AppendEntriesArgs{Term: currentTerm,
@@ -598,7 +611,7 @@ func (rf *Raft) startElection() {
 		//rf.mu.Lock()
 		//rf.currentTerm--
 		//rf.mu.Unlock()
-		DPrintf("%v选举超时或者不成功", candidateID)
+		//DPrintf("%v选举超时或者不成功", candidateID)
 	}
 	rf.mu.Lock()
 	rf.votedFor = -1
@@ -659,6 +672,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister,
 
 	nextIndex := make([]int, len(peers))
 	matchIndex := make([]int, len(peers))
+	log := make([]Entries, 0)
 
 	rf := &Raft{
 		peers:          peers,
@@ -671,6 +685,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister,
 		isLeader:       false,
 		nextIndex:      nextIndex,
 		matchIndex:     matchIndex,
+		committedIndex: 0,
+		log:            log,
 	}
 
 	// Your initialization code here (3A, 3B, 3C).
