@@ -171,35 +171,52 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		return
 	}
-
+	//DPrintf("args:%v", args)
 	//entry不为空，说明是正式的leader发送的有消息的心跳，否则为上位宣称
+	//或者二者刚刚同步，本次心跳没有新消息
 	if len(args.Entries) != 0 {
 		DPrintf("收到有效内容")
 		//log中第一个entry的Index
-		iniIndex := 0
+
+		//正常消息，非第一条
 		if len(rf.log) != 0 {
-			iniIndex = rf.log[0].Index
+
+			iniIndex := rf.log[0].Index //1
+
 			//推算prevLogIndex对应的entry的实际log位置
 			order := args.PrevLogIndex - iniIndex
+
 			//检查prevLogIndex
 			if order < 0 || rf.log[order].Term != args.PrevLogTerm {
 				reply.Success = false
 				return
 			}
-			//修剪log
-			if len(rf.log) != 0 {
-				rf.log = append(rf.log[:order], args.Entries...)
-				DPrintf("received")
-			} else {
-				rf.log = args.Entries
-				DPrintf("received")
 
+			//修剪log
+			rf.log = append(rf.log[:order], args.Entries...)
+			DPrintf("received")
+
+		} else { //全场第一条消息
+
+			//prevLogIndex为0，则合理，否错错误
+			if args.PrevLogIndex != 0 {
+				reply.Success = false
+				return
 			}
+			//直接保留所有log
+			rf.log = args.Entries
+			DPrintf("received")
 		}
 
 		//修改commitedIndex
+		//如果没错，log已经有内容
 		if args.LeaderCommit > rf.committedIndex {
-			rf.committedIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
+			rf.committedIndex = min(args.LeaderCommit, rf.log[len(rf.log)].Index)
+		}
+
+	} else {
+		if args.LeaderCommit != -1 { //正常领导者的心跳
+			rf.committedIndex = args.LeaderCommit
 		}
 	}
 
@@ -263,7 +280,7 @@ type AppendEntriesResult struct {
 // TODO 维持心跳。leader才有
 func (rf *Raft) HeartBeats() {
 	for rf.killed() == false {
-		for rf.isLeader == true {
+		for rf.isLeader == true && rf.killed() == false {
 			rf.mu.Lock()
 			nums := len(rf.peers)
 			resultCh := make(chan AppendEntriesResult, nums)
@@ -281,10 +298,10 @@ func (rf *Raft) HeartBeats() {
 
 			iniIndex := 0
 			if len(entries) != 0 {
-				iniIndex = entries[0].Index
+				iniIndex = entries[0].Index //
 			}
 			rf.mu.Unlock()
-			DPrintf("entries:%v", entries)
+			//DPrintf("entries:%v", entries)
 
 			for i, _ := range peers {
 				if i != me {
@@ -295,20 +312,21 @@ func (rf *Raft) HeartBeats() {
 							PrevLogIndex: matchIndex[i],
 							LeaderCommit: leaderCommit,
 						}
-						if matchIndex[me] > commitedIndex && len(entries) != 0 {
-							if len(entries) == 1 {
-								args.Entries = entries
-							} else {
-								args.Entries = entries[matchIndex[i]-iniIndex:]
-							}
-							DPrintf("Entries:%v", args.Entries)
-						}
 
 						prevLogTerm := 0
 
-						if len(entries) != 0 {
+						//如果有新消息，log一定存在
+						if matchIndex[me] > commitedIndex && len(entries) != 0 {
+
+							if len(entries) == 1 { //只有一条的话肯定就是这一条
+								args.Entries = entries
+							} else { //不止一条的话传follower没有的
+								args.Entries = entries[matchIndex[i]-iniIndex:]
+							}
+							//DPrintf("Entries:%v", args.Entries)
 							prevLogTerm = entries[matchIndex[me]-iniIndex].Term
 						}
+
 						args.PrevLogTerm = prevLogTerm
 						reply := &AppendEntriesReply{}
 
@@ -396,8 +414,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	lastLogIndex := rf.committedIndex
 	lastLogTerm := 0
+
+	//说明已经收到过信息，log有内容
 	if lastLogIndex > 0 {
-		lastLogTerm = rf.log[lastLogIndex].Term
+		lastLogTerm = rf.log[lastLogIndex-1].Term
 	}
 
 	//判断日志新旧
@@ -457,30 +477,30 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	index = 1
-	if len(rf.log) != 0 {
-		//index = rf.log[len(rf.log)-1].Index + 1
-		index = rf.nextIndex[rf.me]
-		rf.nextIndex[rf.me]++
-	}
-	isLeader = rf.isLeader
-	term = rf.currentTerm
 
-	if !isLeader {
+	//首先判断leader
+	if !rf.isLeader {
 		return
 	}
+
+	rf.matchIndex[rf.me] = rf.nextIndex[rf.me]
+	index = rf.nextIndex[rf.me]
+
+	rf.nextIndex[rf.me]++
+
+	//DPrintf("%v", command)
 
 	entry := Entries{
 		Command: command,
 		Index:   index,
-		Term:    term,
+		Term:    rf.currentTerm,
 	}
 
 	//将新的entry加入log
 	rf.log = append(rf.log, entry)
-	rf.matchIndex[rf.me]++
+
 	// Your code here (3B).
-	DPrintf("收到消息")
+
 	return
 }
 
@@ -584,30 +604,36 @@ func (rf *Raft) startElection() {
 	}
 
 	select {
-	case <-c:
+	case <-c: //当选
 		rf.mu.Lock()
 		rf.isLeader = true
-		lastLogIndex := 0
+		lastLogIndex := 1
+
+		//之前收到过消息
 		if len(rf.log) != 0 {
 			//DPrintf("%v", rf.log)
-			lastLogIndex = rf.log[len(rf.log)].Index + 1
+			lastLogIndex = rf.log[len(rf.log)-1].Index + 1
 		}
 
+		//初始化nextIndex 初始化matchIndex
 		for i, _ := range rf.nextIndex {
 			rf.nextIndex[i] = lastLogIndex
+			rf.matchIndex[i] = 0
 		}
+
 		rf.mu.Unlock()
 
 		//DPrintf("%v成功,当前term%v", candidateID, currentTerm)
 		for i, _ := range peers {
 			if i != candidateID {
 				args := &AppendEntriesArgs{Term: currentTerm,
-					LeaderId: candidateID}
+					LeaderId: candidateID, LeaderCommit: -1} //使用leadercommitted为-1来象征宣称信息
 				reply := &AppendEntriesReply{}
 				go rf.sendAppendEntries(i, args, reply)
 			}
 		}
-	case <-time.After(50 * time.Millisecond):
+
+	case <-time.After(50 * time.Millisecond): //超时
 		//rf.mu.Lock()
 		//rf.currentTerm--
 		//rf.mu.Unlock()
@@ -618,43 +644,82 @@ func (rf *Raft) startElection() {
 	rf.mu.Unlock()
 }
 
+// XXX apply
 func (rf *Raft) apply(applyCh chan ApplyMsg) {
-	for rf.killed() == false && rf.isLeader {
-		rf.mu.Lock()
+	for rf.killed() == false {
 
-		committedIndex := rf.committedIndex
-		matchIndex := rf.matchIndex
-		th := len(rf.peers) / 2
-		rf.mu.Unlock()
-
-		counts := 0
-
-		for _, v := range matchIndex {
-			if v > committedIndex {
-				counts++
-			}
-		}
-
-		applyMsg := ApplyMsg{
-			CommandValid: true,
-			//Command:      rf.log[committedIndex].Command,
-			CommandIndex: committedIndex + 1,
-		}
-
-		if counts >= th {
+		//leader角度
+		for rf.isLeader && rf.killed() == false {
 			rf.mu.Lock()
-			rf.committedIndex++
-
-			initIndex := rf.log[0].Index
-			applyMsg.Command = rf.log[committedIndex+1-initIndex]
+			me := rf.me
+			committedIndex := rf.committedIndex
+			matchIndex := rf.matchIndex
+			th := len(rf.peers) / 2
 			rf.mu.Unlock()
+
+			counts := 0
+			DPrintf("id:%v,committedIndex:%v", me, committedIndex)
+			for _, v := range matchIndex {
+				if committedIndex != -1 && v > committedIndex {
+					counts++
+				}
+			}
+
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				//Command:      rf.log[committedIndex].Command,
+				CommandIndex: committedIndex + 1,
+			}
+			if counts > th {
+				rf.mu.Lock()
+				rf.committedIndex++
+
+				initIndex := rf.log[0].Index
+				applyMsg.Command = rf.log[committedIndex+1-initIndex].Command
+				rf.mu.Unlock()
+				DPrintf("state:%v,一条消息过半认同", rf.isLeader)
+				applyCh <- applyMsg
+				rf.mu.Lock()
+				rf.lastApplied++
+				rf.mu.Unlock()
+			}
+			time.Sleep(30 * time.Millisecond)
 		}
 
-		applyCh <- applyMsg
+		//follower角度
+		for !rf.isLeader && rf.killed() == false {
+			rf.mu.Lock()
 
-		time.Sleep(10 * time.Millisecond)
+			committedIndex := rf.committedIndex
+			lastApplied := rf.lastApplied
+			log := rf.log
+
+			rf.mu.Unlock()
+
+			if committedIndex > lastApplied {
+				rf.mu.Lock()
+				iniIndex := 0
+				if len(log) != 0 {
+					iniIndex = rf.log[0].Index
+				}
+				rf.mu.Unlock()
+				applyMsg := ApplyMsg{
+					CommandValid: true,
+					Command:      log[committedIndex-iniIndex].Command,
+					CommandIndex: committedIndex,
+				}
+
+				DPrintf("state:%v,leader确认commited，apply", rf.isLeader)
+				applyCh <- applyMsg
+				rf.mu.Lock()
+				rf.lastApplied++
+				rf.mu.Unlock()
+			}
+
+			time.Sleep(30 * time.Millisecond)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	time.Sleep(50 * time.Millisecond)
 }
 
 // TODO Make
