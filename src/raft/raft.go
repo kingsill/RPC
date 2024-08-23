@@ -166,8 +166,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.lastRevTime = time.Now()
 
 	//判断是否leader过时
-	if args.Term < rf.currentTerm {
-		//DPrintf("ID:%v,leader过时", args.LeaderId)
+	if args.Term < rf.currentTerm && args.LeaderCommit < rf.committedIndex {
+		//DPrintf("Args Term:%v", args.Term)
+		//DPrintf("currentTerm:%v", rf.currentTerm)
+		DPrintf("ID:%v,leader过时", args.LeaderId)
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
@@ -596,7 +598,7 @@ func (rf *Raft) ticker() {
 
 		//只有candidate和follower才能发起选举
 
-		if rf.isLeader != true {
+		if !rf.isLeader {
 
 			//超时
 			if time.Since(rf.lastRevTime) > rf.electedTimeOut {
@@ -721,6 +723,7 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 			committedIndex := rf.committedIndex
 			matchIndex := rf.matchIndex
 			th := len(rf.peers) / 2
+			lastApplied := rf.lastApplied
 			rf.mu.Unlock()
 
 			counts := 0
@@ -734,7 +737,7 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 			applyMsg := ApplyMsg{
 				CommandValid: true,
 				//Command:      rf.log[committedIndex].Command,
-				CommandIndex: committedIndex + 1,
+				CommandIndex: lastApplied + 1,
 			}
 			if counts > th {
 				rf.mu.Lock()
@@ -742,6 +745,7 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 
 				initIndex := rf.log[0].Index
 				applyMsg.Command = rf.log[committedIndex+1-initIndex].Command
+				DPrintf("id:%v,commandIndex:%v", rf.me, committedIndex+1)
 				rf.mu.Unlock()
 				//DPrintf("state:%v,一条消息过半认同", rf.isLeader)
 				applyCh <- applyMsg
@@ -770,19 +774,20 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 				if len(log) != 0 {
 					iniIndex = rf.log[0].Index
 				}
-
+				DPrintf("id:%v,commandIndex:%v", rf.me, committedIndex)
 				rf.mu.Unlock()
 
 				//DPrintf("commitedIndex:%v", committedIndex)
 				applyMsg := ApplyMsg{
 					CommandValid: true,
-					Command:      log[committedIndex-iniIndex].Command,
-					CommandIndex: committedIndex,
+					Command:      log[lastApplied+1-iniIndex].Command,
+					CommandIndex: lastApplied + 1,
 				}
 
 				//DPrintf("state:%v,leader确认commited，apply", rf.isLeader)
 				applyCh <- applyMsg
 				rf.mu.Lock()
+
 				rf.lastApplied++
 				rf.mu.Unlock()
 			}
