@@ -166,7 +166,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.lastRevTime = time.Now()
 
 	//判断是否leader过时
-	if args.Term < rf.currentTerm && args.LeaderCommit < rf.committedIndex {
+	//if args.Term < rf.currentTerm && args.LeaderCommit < rf.committedIndex {
+	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && args.LeaderCommit < rf.committedIndex) {
 		//DPrintf("Args Term:%v", args.Term)
 		//DPrintf("currentTerm:%v", rf.currentTerm)
 		DPrintf("ID:%v,leader过时", args.LeaderId)
@@ -178,10 +179,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//entry不为空，说明是正式的leader发送的有消息的心跳，否则为上位宣称
 	//或者二者刚刚同步，本次心跳没有新消息
 	if len(args.Entries) != 0 {
-		//DPrintf("收到有效内容")
+		DPrintf("收到有效内容")
 
 		//正常消息，非第一条
-		if len(rf.log) != 0 {
+		if len(rf.log) != 0 && args.PrevLogTerm != -1 {
 
 			iniIndex := rf.log[0].Index //1
 
@@ -190,40 +191,44 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//0			1			1
 
 			//检查prevLogIndex
-			if order < 0 || order >= len(rf.log) || rf.log[order].Term != args.PrevLogTerm {
+			//if order < 0 || order >= len(rf.log) || rf.log[order].Term != args.PrevLogTerm {
+			if order < 0 || order >= len(rf.log) || rf.log[order].Term != args.PrevLogTerm { //不匹配问题，不是要减next的地方
 				reply.Success = false
 				return
 			}
 
 			//修剪log
 			rf.log = append(rf.log[:order+1], args.Entries...)
-			DPrintf("received1")
+			DPrintf("received1,id:%v", rf.me)
 
 		} else { //全场第一条消息
 
-			//prevLogIndex为0，则合理，否错错误
-			if args.PrevLogIndex != 0 {
-				reply.Success = false
-				return
-			}
+			////prevLogIndex为0，则合理，否错错误
+			//if args.PrevLogIndex != 0 {
+			//	reply.Success = false
+			//	return
+			//}
 			//直接保留所有log
 			rf.log = args.Entries
-			DPrintf("received2")
+			DPrintf("received2,id:%v", rf.me)
 		}
 
 		//修改commitedIndex
 		//如果没错，log已经有内容
 		if args.LeaderCommit > rf.committedIndex {
 			rf.committedIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
+			DPrintf("follower,1committedIndex:%v", rf.committedIndex)
 		}
 
 	} else if args.LeaderCommit != -1 { //正常领导者的心跳
 		if len(rf.log) != 0 {
 			if args.LeaderCommit > rf.committedIndex {
 				rf.committedIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
+				DPrintf("follower,2committedIndex:%v", rf.committedIndex)
 			}
 		} else if args.LeaderCommit > rf.committedIndex {
 			rf.committedIndex = 0
+			DPrintf("follower,3committedIndex:%v", rf.committedIndex)
 		}
 	}
 
@@ -275,7 +280,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			if rf.currentTerm < reply.Term { //leader过时导致失败
 				rf.isLeader = false
 				rf.currentTerm = reply.Term
+				rf.log = rf.log[:rf.committedIndex]
 			} else { //其他失败
+				DPrintf("id:%v,减nextIndex", server)
 				rf.nextIndex[server]--
 			}
 		}
@@ -329,8 +336,8 @@ func (rf *Raft) HeartBeats() {
 							PrevLogIndex: nextIndex[i] - 1, //1
 							LeaderCommit: leaderCommit,
 						}
-						DPrintf("matchIndex:%v", matchIndex)
-						DPrintf("nextIndex:%v", nextIndex)
+						//DPrintf("matchIndex:%v", matchIndex)
+						//DPrintf("nextIndex:%v", nextIndex)
 						prevLogTerm := 0
 
 						//如果有新消息，log一定存在 全是leader信息
@@ -340,10 +347,14 @@ func (rf *Raft) HeartBeats() {
 							//考虑消息累计，leader有多个还没发给follower
 							//如何判断是别人的全场第一条：
 							//nextIndex是否为1，已经判断过leader是否有内容
-							if nextIndex[i] == 1 {
+							if nextIndex[i] == 1 { //第一条
 								args.Entries = entries
+							} else if nextIndex[i] == 0 { //全覆盖
+								args.Entries = entries
+								prevLogTerm = -1
 							} else { //不止一条的话传follower没有的
 								//这里要使用nextIndex了
+								DPrintf("id:%v,nextIndex:%v,initIndex:%v", i, nextIndex[i], iniIndex)
 								args.Entries = entries[nextIndex[i]-iniIndex:] //2-1
 
 								//如果新的leader，match清零怎么办
@@ -377,8 +388,8 @@ func (rf *Raft) HeartBeats() {
 						args.PrevLogTerm = prevLogTerm
 						reply := &AppendEntriesReply{}
 
-						DPrintf("prev:(%v,%v)", args.PrevLogIndex, args.PrevLogTerm)
-						DPrintf("args entry:%v", args.Entries)
+						//DPrintf("prev:(%v,%v)", args.PrevLogIndex, args.PrevLogTerm)
+						//DPrintf("args entry:%v", args.Entries)
 						//ok := rf.sendAppendEntries(i, args, reply)
 						rf.sendAppendEntries(i, args, reply)
 
@@ -412,7 +423,7 @@ func (rf *Raft) HeartBeats() {
 			//if stop {
 			//	break
 			//}
-			time.Sleep(30 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -450,7 +461,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//如果candidate的term小于当前的term，返回false，并且告知candidate当前的term
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
-		//DPrintf("%v过时", args.CandidateId)
+		DPrintf("%v过时", args.CandidateId)
 		reply.VoteGranted = false
 		return
 	}
@@ -564,7 +575,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 
 	//将新的entry加入log
 	rf.log = append(rf.log, entry)
-	DPrintf("leaderLog:%v", rf.log)
+	//DPrintf("leaderLog:%v", rf.log)
 	// Your code here (3B).
 
 	return
@@ -602,7 +613,7 @@ func (rf *Raft) ticker() {
 
 			//超时
 			if time.Since(rf.lastRevTime) > rf.electedTimeOut {
-				DPrintf("%v超时,开始选举", rf.me)
+				DPrintf("%v超时,开始选举,时间：%v", rf.me, time.Since(rf.lastRevTime))
 				rf.startElection()
 			}
 		}
@@ -742,10 +753,10 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 			if counts > th {
 				rf.mu.Lock()
 				rf.committedIndex++
-
+				DPrintf("leader,id:%v,log:%v,committedIndex:%v", rf.me, rf.log, rf.committedIndex)
 				initIndex := rf.log[0].Index
 				applyMsg.Command = rf.log[committedIndex+1-initIndex].Command
-				DPrintf("id:%v,commandIndex:%v", rf.me, committedIndex+1)
+				//DPrintf("id:%v,commandIndex:%v", rf.me, committedIndex+1)
 				rf.mu.Unlock()
 				//DPrintf("state:%v,一条消息过半认同", rf.isLeader)
 				applyCh <- applyMsg
@@ -755,11 +766,10 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 			}
 			time.Sleep(30 * time.Millisecond)
 		}
-
 		//follower角度
 		for !rf.isLeader && rf.killed() == false {
 			rf.mu.Lock()
-
+			//DPrintf("follower:%v try apply", rf.me)
 			committedIndex := rf.committedIndex
 			lastApplied := rf.lastApplied
 			log := rf.log
@@ -769,12 +779,14 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 			if committedIndex > lastApplied {
 				//1					0
 				rf.mu.Lock()
+
+				DPrintf("follower,id:%v,log:%v,committedIndex:%v", rf.me, rf.log, rf.committedIndex)
 				iniIndex := 1
 				//DPrintf("log:%v", log)
 				if len(log) != 0 {
 					iniIndex = rf.log[0].Index
 				}
-				DPrintf("id:%v,commandIndex:%v", rf.me, committedIndex)
+				//DPrintf("id:%v,commandIndex:%v", rf.me, committedIndex)
 				rf.mu.Unlock()
 
 				//DPrintf("commitedIndex:%v", committedIndex)
@@ -823,7 +835,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister,
 		persister:      persister,
 		me:             me,
 		votedFor:       -1,
-		electedTimeOut: time.Millisecond * 300, //设定心跳超时时间,开始选举
+		electedTimeOut: time.Millisecond * 400, //设定心跳超时时间,开始选举
 		lastRevTime:    time.Now(),             //初始化为设置当前时间
 		currentTerm:    0,
 		isLeader:       false,
