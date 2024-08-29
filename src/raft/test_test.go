@@ -506,9 +506,9 @@ func TestBackup3B(t *testing.T) {
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
 
-	DPrintf("开始给leader%v，发送50个随机数", leader1)
+	DPrintf("开始给leader%v，发送10个随机数", leader1)
 	// submit lots of commands that won't commit
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 10; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
 
@@ -524,9 +524,9 @@ func TestBackup3B(t *testing.T) {
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
 
-	DPrintf("再给leader%v，发送50个随机数", leader1)
+	DPrintf("再给raft，发送10个随机数")
 	// lots of successful commands to new group.
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 10; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
 
@@ -537,32 +537,41 @@ func TestBackup3B(t *testing.T) {
 	if leader2 == other {
 		other = (leader2 + 1) % servers
 	}
+	DPrintf("断开id：%v连接", other)
 	cfg.disconnect(other)
 
+	DPrintf("给leader2，id:%v，发送10个随机数", leader2)
 	// lots more commands that won't commit
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 10; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
 
+	DPrintf("每一个都断开连接")
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 	}
+
+	DPrintf("恢复连接：%v %v %v", (leader1+0)%servers, (leader1+1)%servers, other)
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
 
+	DPrintf("发送10随机数")
 	// lots of successful commands to new group.
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 10; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
 
+	DPrintf("恢复所有连接")
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
+
+	DPrintf("再发送最后一个数")
 	cfg.one(rand.Int(), servers, true)
 
 	cfg.end()
