@@ -222,7 +222,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	} else if args.LeaderCommit != -1 { //正常领导者的心跳
 		if len(rf.log) != 0 {
-			if args.LeaderCommit > rf.committedIndex {
+			if args.LeaderCommit > rf.committedIndex && args.Term == rf.log[len(rf.log)-1].Term {
 				rf.committedIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
 				DPrintf("follower,2committedIndex:%v", rf.committedIndex)
 			}
@@ -270,6 +270,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 	select {
 	case result := <-resultChan:
+		DPrintf("%vsendAppendEntries有结果", server)
 		//成功的话更新matchindex表
 		if reply.Success {
 			if len(args.Entries) != 0 {
@@ -291,6 +292,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 		return result // RPC调用成功，返回结果
 	case <-time.After(10 * time.Millisecond):
+		DPrintf("%vsendAppendEntries超时", server)
 		return false // 超时，返回false
 	}
 }
@@ -425,7 +427,7 @@ func (rf *Raft) HeartBeats() {
 			//if stop {
 			//	break
 			//}
-			time.Sleep(20 * time.Millisecond)
+			time.Sleep(40 * time.Millisecond)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -683,7 +685,7 @@ func (rf *Raft) startElection() {
 
 	select {
 	case <-c: //当选
-		rf.isLeader = true
+
 		lastLogIndex := 1
 
 		//之前收到过消息
@@ -692,11 +694,15 @@ func (rf *Raft) startElection() {
 			lastLogIndex = rf.log[len(rf.log)-1].Index + 1
 		}
 
+		DPrintf("leader%v nextIndex:%v", rf.me, lastLogIndex)
+
 		//初始化nextIndex 初始化matchIndex
 		for i, _ := range rf.nextIndex {
 			rf.nextIndex[i] = lastLogIndex
 			rf.matchIndex[i] = 0
+
 		}
+		rf.isLeader = true
 
 		//DPrintf("%v成功,当前term%v", candidateID, currentTerm)
 		for i, _ := range rf.peers {

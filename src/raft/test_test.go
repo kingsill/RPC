@@ -497,7 +497,8 @@ func TestBackup3B(t *testing.T) {
 
 	cfg.begin("Test (3B): leader backs up quickly over incorrect follower logs")
 
-	cfg.one(rand.Int(), servers, true)
+	//cfg.one(rand.Int(), servers, true)
+	cfg.one(1, servers, true)
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
@@ -509,7 +510,8 @@ func TestBackup3B(t *testing.T) {
 	DPrintf("开始给leader%v，发送10个随机数", leader1)
 	// submit lots of commands that won't commit
 	for i := 0; i < 10; i++ {
-		cfg.rafts[leader1].Start(rand.Int())
+		//cfg.rafts[leader1].Start(rand.Int())
+		cfg.rafts[leader1].Start(i)
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
@@ -527,7 +529,8 @@ func TestBackup3B(t *testing.T) {
 	DPrintf("再给raft，发送10个随机数")
 	// lots of successful commands to new group.
 	for i := 0; i < 10; i++ {
-		cfg.one(rand.Int(), 3, true)
+		//cfg.one(rand.Int(), 3, true)
+		cfg.one(i+10, 3, true)
 	}
 
 	// now another partitioned leader and one follower
@@ -543,7 +546,8 @@ func TestBackup3B(t *testing.T) {
 	DPrintf("给leader2，id:%v，发送10个随机数", leader2)
 	// lots more commands that won't commit
 	for i := 0; i < 10; i++ {
-		cfg.rafts[leader2].Start(rand.Int())
+		//cfg.rafts[leader2].Start(rand.Int())
+		cfg.rafts[leader2].Start(i + 20)
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
@@ -562,7 +566,8 @@ func TestBackup3B(t *testing.T) {
 	DPrintf("发送10随机数")
 	// lots of successful commands to new group.
 	for i := 0; i < 10; i++ {
-		cfg.one(rand.Int(), 3, true)
+		//cfg.one(rand.Int(), 3, true)
+		cfg.one(i+30, 3, true)
 	}
 
 	DPrintf("恢复所有连接")
@@ -572,7 +577,8 @@ func TestBackup3B(t *testing.T) {
 	}
 
 	DPrintf("再发送最后一个数")
-	cfg.one(rand.Int(), servers, true)
+	//cfg.one(rand.Int(), servers, true)
+	cfg.one(99, servers, true)
 
 	cfg.end()
 }
