@@ -102,7 +102,6 @@ type NeedP struct {
 	CurrentTerm int
 	VotedFor    int
 	Log         []Entries
-	Committed   int
 }
 
 // TODO persist
@@ -116,7 +115,7 @@ type NeedP struct {
 func (rf *Raft) persist() {
 	// Your code here (3C).
 	// Example:
-	P := &NeedP{rf.currentTerm, rf.votedFor, rf.log, rf.committedIndex}
+	P := &NeedP{rf.currentTerm, rf.votedFor, rf.log}
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(P)
@@ -139,7 +138,6 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.currentTerm = P.CurrentTerm
 	rf.votedFor = P.VotedFor
 	rf.log = P.Log
-	rf.committedIndex = P.Committed
 }
 
 // the service says it has created a snapshot that has
@@ -200,14 +198,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//0			1			1
 
 			//检查prevLogIndex
-			//if order < 0 || order >= len(rf.log) || rf.log[order].Term != args.PrevLogTerm {
 			if order < 0 || order >= len(rf.log) || rf.log[order].Term != args.PrevLogTerm { //不匹配问题，不是要减next的地方
+				//if rf.log[order].Term != args.PrevLogTerm { //不匹配问题，不是要减next的地方
 				reply.Success = false
 				return
 			}
 
 			//修剪log
 			rf.log = append(rf.log[:order+1], args.Entries...)
+			rf.matchIndex[rf.me] = 1
 			rf.persist()
 			DPrintf("received1,id:%v", rf.me)
 
@@ -220,6 +219,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//}
 			//直接保留所有log
 			rf.log = args.Entries
+			rf.matchIndex[rf.me] = 1
 			rf.persist()
 			DPrintf("received2,id:%v", rf.me)
 		}
@@ -234,7 +234,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	} else if args.LeaderCommit != -1 { //正常领导者的心跳
 		if len(rf.log) != 0 {
-			if args.LeaderCommit > rf.committedIndex && args.Term == rf.log[len(rf.log)-1].Term {
+			//if args.LeaderCommit > rf.committedIndex && args.Term == rf.log[len(rf.log)-1].Term {
+			if args.LeaderCommit > rf.committedIndex && rf.matchIndex[rf.me] == 1 {
 				rf.committedIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
 				rf.persist()
 				DPrintf("follower,2committedIndex:%v", rf.committedIndex)
@@ -244,6 +245,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.persist()
 			DPrintf("follower,3committedIndex:%v", rf.committedIndex)
 		}
+	} else {
+		rf.matchIndex[rf.me] = 0
 	}
 
 	//同步term
@@ -289,10 +292,16 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		//DPrintf("%vsendAppendEntries有结果", server)
 		//成功的话更新matchindex表
 		if reply.Success {
+			//一共几种情况，已知成功
+			//leader宣称，entris为0，prevTerm -1
+			//leader无新消息心跳成功，entries为0，更新match
+			//leader有新消息心跳成功，entries 0
+
 			if len(args.Entries) != 0 {
 				rf.matchIndex[server] = args.Entries[len(args.Entries)-1].Index
 				rf.nextIndex[server] = args.Entries[len(args.Entries)-1].Index + 1
 			}
+
 		} else {
 			if rf.currentTerm < reply.Term { //leader过时导致失败
 				rf.isLeader = false
@@ -362,27 +371,35 @@ func (rf *Raft) HeartBeats() {
 						prevLogTerm := 0
 
 						//如果有新消息，log一定存在 全是leader信息
-						//if matchIndex[me] > commitedIndex && len(entries) != 0 {
-						if nextIndex[i] < matchIndex[me]+1 && len(entries) != 0 { //有过start的leader
+						if args.PrevLogIndex < matchIndex[me] {
 
 							//考虑消息累计，leader有多个还没发给follower
 							//如何判断是别人的全场第一条：
 							//nextIndex是否为1，已经判断过leader是否有内容
-							if nextIndex[i] == 1 { //第一条
+							if args.PrevLogIndex == 0 { //第一条
+
 								args.Entries = entries
-							} else if nextIndex[i] <= 0 { //全覆盖
+							} else if args.PrevLogIndex < 0 { //全覆盖
+
 								args.Entries = entries
 								prevLogTerm = -1
-							} else if nextIndex[i] > len(entries) { //leader的日志比follower的短，直接覆盖？
+							} else if args.PrevLogIndex > len(entries) { //leader的日志比follower的短，直接覆盖？
+
 								args.Entries = entries
 								prevLogTerm = -1
 							} else { //不止一条的话传follower没有的
-								//这里要使用nextIndex了
-								//DPrintf("id:%v,nextIndex:%v,initIndex:%v", i, nextIndex[i], iniIndex)
-								args.Entries = entries[nextIndex[i]-iniIndex:] //2-1
+								if matchIndex[i] == 0 {
+									args.Entries = entries
+									prevLogTerm = -1
+								} else {
 
-								//如果新的leader，match清零怎么办
-								prevLogTerm = entries[nextIndex[i]-iniIndex-1].Term
+									//这里要使用nextIndex了
+									//DPrintf("id:%v,nextIndex:%v,initIndex:%v", i, nextIndex[i], iniIndex)
+									args.Entries = entries[nextIndex[i]-iniIndex:] //2-1
+
+									//如果新的leader，match清零怎么办
+									prevLogTerm = entries[nextIndex[i]-iniIndex-1].Term
+								}
 							}
 
 							//if len(entries) == 1 { //只有一条的话肯定就是这一条
@@ -477,7 +494,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
+
 	//在接到投票请求是是否刷新心跳超时
 	//rf.lastRevTime = time.Now()
 
@@ -497,19 +514,32 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	lastLogIndex := rf.committedIndex
-	//lastLogTerm := 0
+	lastLogIndex := 0
+	lastLogTerm := 0
 
-	//说明已经收到过信息，log有内容
-	if lastLogIndex > 0 {
-		//lastLogTerm = rf.log[lastLogIndex-1].Term
+	if len(rf.log) != 0 {
+		lastLogIndex = rf.log[len(rf.log)-1].Index
+		lastLogTerm = rf.log[lastLogIndex-1].Term
+	}
+
+	switch lastLogTerm == args.LastLogTerm {
+	case true:
+		if args.LastLogIndex < lastLogIndex {
+			reply.VoteGranted = false
+			return
+		}
+	case false:
+		if args.LastLogTerm < lastLogTerm {
+			reply.VoteGranted = false
+			return
+		}
 	}
 
 	//判断日志新旧
 	//if (args.LastLogTerm > lastLogTerm) ||args.LastLogIndex >= lastLogIndex {
 	if args.LastLogIndex >= lastLogIndex {
 		rf.votedFor = args.CandidateId
-
+		rf.persist()
 		reply.VoteGranted = true
 		//DPrintf("投票给%v", args.CandidateId)
 		rf.lastRevTime = time.Now()
@@ -571,7 +601,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 	}
 	isLeader = true
 
-	DPrintf("leader：%v，command:%v", rf.me, command)
+	//DPrintf("leader：%v，command:%v", rf.me, command)
 
 	////检测是否已经提交
 	//if command == rf.log[rf.committedIndex].Command {
@@ -669,7 +699,7 @@ func (rf *Raft) startElection() {
 	}
 	rf.persist()
 	defer rf.mu.Unlock()
-	defer rf.persist()
+	//defer rf.persist()
 	//DPrintf("ID:%v;Term:%v开始竞选，需要票数%v", rf.me, rf.currentTerm, sucNum)
 	num := 0
 
@@ -747,6 +777,7 @@ func (rf *Raft) startElection() {
 		//DPrintf("%v选举超时或者不成功", candidateID)
 	}
 	rf.votedFor = -1
+	rf.persist()
 }
 
 // XXX apply
