@@ -218,7 +218,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//	return
 			//}
 			//直接保留所有log
-			rf.log = args.Entries
+
+			if len(rf.log) == 0 {
+				rf.log = args.Entries
+			} else if len(rf.log) == rf.committedIndex {
+				if len(args.Entries) <= rf.committedIndex { //args的entries长度小于committedIndex，不理会
+					DPrintf("有事儿吗1")
+					reply.Success = false
+					return
+				}
+				DPrintf("一点儿事儿没有1 ")
+				rf.log = append(rf.log, args.Entries[rf.committedIndex+1:]...)
+			} else if len(rf.log) > rf.committedIndex {
+				if len(args.Entries) > rf.committedIndex {
+					DPrintf("一点儿事儿么有2")
+					rf.log = append(rf.log[:rf.committedIndex+1], args.Entries[rf.committedIndex+1:]...)
+				} else {
+					DPrintf("有事儿吗2")
+					reply.Success = false
+					return
+				}
+
+			}
 			rf.matchIndex[rf.me] = 1
 			rf.persist()
 			DPrintf("received2,id:%v", rf.me)
@@ -231,7 +252,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.persist()
 			DPrintf("follower,1committedIndex:%v", rf.committedIndex)
 		}
-
 	} else if args.LeaderCommit != -1 { //正常领导者的心跳
 		if len(rf.log) != 0 {
 			//if args.LeaderCommit > rf.committedIndex && args.Term == rf.log[len(rf.log)-1].Term {
@@ -388,10 +408,11 @@ func (rf *Raft) HeartBeats() {
 								args.Entries = entries
 								prevLogTerm = -1
 							} else { //不止一条的话传follower没有的
-								if matchIndex[i] == 0 {
-									args.Entries = entries
-									prevLogTerm = -1
-								} else {
+								//if matchIndex[i] == 0 {
+								//	args.Entries = entries
+								//	prevLogTerm = -1
+								//} else
+								{
 
 									//这里要使用nextIndex了
 									//DPrintf("id:%v,nextIndex:%v,initIndex:%v", i, nextIndex[i], iniIndex)
@@ -822,7 +843,7 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 				rf.lastApplied++
 				rf.mu.Unlock()
 			}
-			time.Sleep(30 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 		//follower角度
 		for !rf.isLeader && rf.killed() == false {
@@ -857,9 +878,9 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 
 			}
 			rf.mu.Unlock()
-			time.Sleep(30 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
