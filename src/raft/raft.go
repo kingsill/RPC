@@ -208,16 +208,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = append(rf.log[:order+1], args.Entries...)
 			rf.matchIndex[rf.me] = 1
 			rf.persist()
-			DPrintf("received1,id:%v", rf.me)
+			DPrintf("received1,id:%v,log:%v", rf.me, args.Entries)
 
 		} else { //全场第一条消息
-
+			if len(rf.log) == 0 {
+				DPrintf("id：%v,log为0", rf.me)
+			} else {
+				DPrintf("id:%v,prevlog为0", rf.me)
+			}
 			////prevLogIndex为0，则合理，否错错误
 			//if args.PrevLogIndex != 0 {
 			//	reply.Success = false
 			//	return
 			//}
 			//直接保留所有log
+
+			//if args.Entries[0].Index != 1 {
+			//	DPrintf("case defalut fault")
+			//	reply.Success = false
+			//	return
+			//}
 
 			if len(rf.log) == 0 {
 				rf.log = args.Entries
@@ -242,7 +252,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			rf.matchIndex[rf.me] = 1
 			rf.persist()
-			DPrintf("received2,id:%v", rf.me)
+			DPrintf("received2,id:%v,log:%v", rf.me, args.Entries)
 		}
 
 		//修改commitedIndex
@@ -326,12 +336,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 			if rf.currentTerm < reply.Term { //leader过时导致失败
 				rf.isLeader = false
 
-				DPrintf("id%v被发现超时，term由%v到%v", rf.me, rf.currentTerm, reply.Term)
+				//DPrintf("id%v被发现超时，term由%v到%v", rf.me, rf.currentTerm, reply.Term)
 				rf.currentTerm = reply.Term
 				rf.log = rf.log[:rf.committedIndex]
 				rf.persist()
 			} else { //其他失败
-				DPrintf("id:%v,减nextIndex", server)
+				//DPrintf("id:%v,减nextIndex", server)
 				rf.nextIndex[server]--
 			}
 		}
@@ -396,15 +406,13 @@ func (rf *Raft) HeartBeats() {
 							//考虑消息累计，leader有多个还没发给follower
 							//如何判断是别人的全场第一条：
 							//nextIndex是否为1，已经判断过leader是否有内容
-							if args.PrevLogIndex == 0 { //第一条
+							if args.PrevLogIndex == 0 { //自己的一条数据没有，空
 
-								args.Entries = entries
-							} else if args.PrevLogIndex < 0 { //全覆盖
+							} else if args.PrevLogIndex < 0 || matchIndex[i] == 0 { //全覆盖，next减到0或者更小了，有这种可能吗？
 
 								args.Entries = entries
 								prevLogTerm = -1
-							} else if args.PrevLogIndex > len(entries) { //leader的日志比follower的短，直接覆盖？
-
+							} else if args.PrevLogIndex < len(entries)-6 {
 								args.Entries = entries
 								prevLogTerm = -1
 							} else { //不止一条的话传follower没有的
@@ -540,7 +548,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if len(rf.log) != 0 {
 		lastLogIndex = rf.log[len(rf.log)-1].Index
-		lastLogTerm = rf.log[lastLogIndex-1].Term
+		lastLogTerm = rf.log[len(rf.log)-1].Term
 	}
 
 	switch lastLogTerm == args.LastLogTerm {
@@ -815,9 +823,19 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 			lastApplied := rf.lastApplied
 			rf.mu.Unlock()
 
+			sig := 0
+
 			counts := 0
 			//DPrintf("id:%v,committedIndex:%v", me, committedIndex)
-			for _, v := range matchIndex {
+			for i, v := range matchIndex {
+
+				if i != rf.me && true == rf.sendAppendEntries(i, &AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					LeaderCommit: committedIndex,
+				}, &AppendEntriesReply{}) && matchIndex[i] >= committedIndex {
+					sig++
+				}
 				if committedIndex != -1 && v > committedIndex {
 					counts++
 				}
@@ -829,6 +847,11 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 				CommandIndex: lastApplied + 1,
 			}
 			if counts > th {
+				if sig < th {
+
+					DPrintf("sig:%v,不能apply", sig)
+					continue
+				}
 				rf.mu.Lock()
 				rf.committedIndex++
 				rf.persist()
