@@ -327,7 +327,7 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 		session := time.Since(rf.time)
 		//DPrintf("%v session:%v", rf.me, session)
-
+		DPrintf("id:%v,log:%v,committedIndex:%v", rf.me, rf.log, rf.committedIndex)
 		//leader不会超时
 		if session > msOut && rf.state != leader {
 			//开始选举
