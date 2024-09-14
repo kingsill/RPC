@@ -733,7 +733,7 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 			applyMsg.CommandIndex = nextApply
 			applyMsg.Command = log[nextApply-firstIndex].Command
 			applyCh <- applyMsg
-			DPrintf("apply %v", applyMsg)
+			DPrintf("id:%v apply %v", rf.me, applyMsg)
 			rf.mu.Lock()
 			rf.lastApplied++
 			rf.mu.Unlock()
