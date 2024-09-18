@@ -581,6 +581,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				//DPrintf("index:%v", index)
 				//DPrintf("nd:%v", nd)
 				//DPrintf("cmd1:%v", cmd1)
 				//DPrintf("cmd:%v", cmd)

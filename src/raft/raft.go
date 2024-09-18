@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.5840/labgob"
+	"bytes"
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -104,6 +106,12 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isLeader
 }
 
+type NeedP struct {
+	CurrentTerm int
+	VotedFor    int
+	Log         []Entry
+}
+
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -120,6 +128,15 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	P := &NeedP{rf.currentTerm, rf.votedFor, rf.log}
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	err := e.Encode(P)
+	if err != nil {
+		return
+	}
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -140,6 +157,16 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var P NeedP
+	err := d.Decode(&P)
+	if err != nil {
+		return
+	}
+	rf.currentTerm = P.CurrentTerm
+	rf.votedFor = P.VotedFor
+	rf.log = P.Log
 }
 
 // the service says it has created a snapshot that has
@@ -197,18 +224,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//没投过票
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) || (args.Term > rf.currentTerm) {
-		lastLogTerm, lastLogIndex := rf.getLastLog()
+		lastLogIndex, lastLogTerm := rf.getLastLog()
 		switch lastLogTerm == args.LastLogTerm {
-		case true:
+		case true: //candidate's last term = server's last term
 			if args.LastLogIndex < lastLogIndex {
 				reply.VoteGranted = false
-				DPrintf("vote falied")
+				DPrintf("me:%v,vote falied1", rf.me)
 				return
 			}
-		case false:
-			if args.LastLogTerm < lastLogTerm {
+		case false: //candidate's last term != server's last term
+			if args.LastLogTerm < lastLogTerm { //2 1
 				reply.VoteGranted = false
-				DPrintf("vote falied")
+				DPrintf("me:%v,term:%v,candidate's term:%v,vote falied2", rf.me, lastLogTerm, args.LastLogTerm)
 				return
 			}
 		}
@@ -288,11 +315,12 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 
 	// Your code here (3B).
 	index, _ = rf.getLastLog()
+	index++
 	term = rf.currentTerm
 	isLeader = true
-	entry := Entry{Command: command, Term: rf.currentTerm, Index: index + 1}
+	entry := Entry{Command: command, Term: rf.currentTerm, Index: index}
 	rf.log = append(rf.log, entry)
-	DPrintf("leader: %v received new entru,log:%v", rf.me, rf.log)
+	//DPrintf("leader: %v received new entru,log:%v,index:%v", rf.me, rf.log, index)
 
 	return
 }
@@ -552,12 +580,14 @@ func (rf *Raft) heartBeats() {
 							rf.nextIndex[i] = lastLog + 1
 							rf.matchIndex[i] = lastLog
 						}
+						//DPrintf("matchIndex:%v", rf.matchIndex)
 					} else {
 						if reply.Term > currentTerm {
 							DPrintf("leader退位")
 							rf.state = follower
 							rf.currentTerm = reply.Term
-						} else if len(args.Entries) != 0 {
+							//} else if len(args.Entries) != 0 {
+						} else {
 							rf.nextIndex[i]--
 						}
 					}
@@ -586,12 +616,19 @@ type AppendEntriesReply struct {
 	XLen   int //日志长度
 }
 
-func (rf *Raft) getTerm(Index int) (term int) {
-	firstIndex, _ := rf.getLastLog()
+func (rf *Raft) getTerm(index int) (term int) {
+	firstIndex, _ := rf.getFirstIndex(rf.log)
 	if firstIndex == 0 {
 		term = 0
 	} else {
-		term = rf.log[Index-firstIndex].Term
+		trueIndex := index - firstIndex
+		if trueIndex >= len(rf.log) { //避免越界
+			term = -1
+		} else {
+			term = rf.log[trueIndex].Term
+		}
+
+		//DPrintf("term:%v", term)
 	}
 	return
 }
@@ -613,7 +650,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-	DPrintf("appendArgs:%v", args)
+	DPrintf("me:%v,appendArgs:%v", rf.me, args)
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
@@ -668,27 +705,30 @@ func (rf *Raft) changeLog(entries []Entry, index int) {
 	if isNull { //rf log 为空
 		rf.log = append(rf.log, entries...)
 	} else {
-		rf.log = append(rf.log[index-index1:], entries...)
+		rf.log = append(rf.log[:index-index1+1], entries...)
 	}
 	//DPrintf("log now:%v", rf.log)
 }
 
 func (rf *Raft) dealConflict(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	first, null := rf.getFirstIndex(rf.log)
-	lastIndex, _ := rf.getLastLog()
+	lastIndex, lastTerm := rf.getLastLog()
 	log := rf.log
 	logFirstIndex := args.Entries[0].Index
 	if null || logFirstIndex > lastIndex { //follower的log为空或者不如entries长
-		reply.XTerm = 0
-		reply.XIndex = 0
+		DPrintf("here")
+		reply.XTerm = lastTerm
+		reply.XIndex = lastIndex
+		reply.XLen = len(rf.log)
 		return
 	}
 
-	for i := logFirstIndex; i < lastIndex; i++ {
-		if log[i-first].Term != args.Entries[i-logFirstIndex].Term {
+	for i := logFirstIndex; i < lastIndex; i++ { //compare new entry and own log
+		if log[i-first].Term != args.Entries[i-logFirstIndex].Term { //term conflict
 			reply.XTerm = log[i-first].Term
 			reply.XIndex = i
 			rf.log = rf.log[:i-first]
+			reply.XLen = len(rf.log)
 			return
 		}
 	}
@@ -717,7 +757,7 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 						counts++
 					}
 				}
-				if counts >= limits+1 {
+				if counts >= limits {
 					rf.mu.Lock()
 					rf.committedIndex = nextApply
 					committedIndex = nextApply
