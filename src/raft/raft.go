@@ -71,7 +71,7 @@ type Raft struct {
 	//persistent
 	currentTerm int
 	votedFor    int
-	log         []Entry
+	log         Entries
 
 	//Volatile
 	committedIndex int
@@ -202,6 +202,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//leader需退位
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	//DPrintf("args:%v", args)
 
 	//当前服务器的term比candidate大
@@ -239,7 +240,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				return
 			}
 		}
-		DPrintf("vote success")
+		DPrintf("id:%v ,vote success", rf.me)
 		reply.VoteGranted = true
 		rf.state = follower
 		rf.time = time.Now()
@@ -308,6 +309,7 @@ func (rf *Raft) Start(command interface{}) (index int, term int, isLeader bool) 
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	//检查是否为leader
 	if rf.state != leader {
 		return
@@ -355,7 +357,7 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 		session := time.Since(rf.time)
 		//DPrintf("%v session:%v", rf.me, session)
-		DPrintf("id:%v,log:%v,committedIndex:%v", rf.me, rf.log, rf.committedIndex)
+		//DPrintf("id:%v,log:%v,committedIndex:%v", rf.me, rf.log, rf.committedIndex)
 		//leader不会超时
 		if session > msOut && rf.state != leader {
 			//开始选举
@@ -384,6 +386,7 @@ func (rf *Raft) startElection() {
 	rf.state = candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.persist()
 	//重置定时器
 	rf.time = time.Now()
 	needVote := len(rf.peers) / 2
@@ -411,6 +414,7 @@ func (rf *Raft) startElection() {
 						rf.state = follower
 						rf.votedFor = -1
 						rf.currentTerm = reply.Term
+						rf.persist()
 					}
 					rf.mu.Unlock()
 				}
@@ -490,6 +494,8 @@ func (rf *Raft) fillAppendArgs(args *AppendEntriesArgs, server int, isNote bool)
 	args.LeaderCommit = rf.committedIndex
 	args.PrevLogIndex = nextIndex - 1
 
+	//DPrintf("%v to %v fillAppendArgs,nextIndex:%v", rf.me, server, nextIndex)
+
 	if nextIndex == 1 {
 		args.PrevLogTerm = 0
 	} else {
@@ -524,6 +530,7 @@ func (rf *Raft) leaderInit() {
 	rf.state = leader
 	nextIndex := rf.nextIndex
 	rf.votedFor = -1
+	rf.persist()
 
 	//初始化nextIndex、matchIndex
 	index, _ := rf.getLastLog()
@@ -547,6 +554,7 @@ func (rf *Raft) leaderInit() {
 						DPrintf("leader 退位")
 						rf.state = follower
 						rf.currentTerm = reply.Term
+						rf.persist()
 						rf.mu.Unlock()
 					}
 				}
@@ -586,9 +594,25 @@ func (rf *Raft) heartBeats() {
 							DPrintf("leader退位")
 							rf.state = follower
 							rf.currentTerm = reply.Term
+							rf.votedFor = -1
+							rf.persist()
 							//} else if len(args.Entries) != 0 {
 						} else {
-							rf.nextIndex[i]--
+							DPrintf("leader:%v,from %v,reply:%v", rf.me, i, reply)
+							if reply.XTerm == -1 {
+								rf.nextIndex[i] = reply.XLen + 1
+								DPrintf("follower too short")
+							} else {
+								isHave, _, lastIndex := rf.searchTerm(reply.XTerm)
+								if isHave {
+									rf.nextIndex[i] = lastIndex
+									DPrintf("same term")
+								} else {
+									DPrintf("different Term")
+									rf.nextIndex[i] = reply.XIndex
+								}
+							}
+							DPrintf("leaderId:%v,nextIndex:%v", rf.me, rf.nextIndex)
 						}
 					}
 				}
@@ -617,6 +641,10 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) getTerm(index int) (term int) {
+	if index == 0 {
+		term = 0
+		return
+	}
 	firstIndex, _ := rf.getFirstIndex(rf.log)
 	if firstIndex == 0 {
 		term = 0
@@ -641,22 +669,37 @@ func (rf *Raft) getFirstIndex(log []Entry) (index int, isNull bool) {
 	return log[0].Index, false
 }
 
+func (rf *Raft) checkTerm(term int) bool {
+	if rf.currentTerm < term {
+		rf.state = follower
+		rf.currentTerm = term
+		rf.votedFor = -1
+		return true
+	}
+	return false
+}
+
 // AppendEntries figure2
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	//过时的先剃出去
 	if args.Term < rf.currentTerm { //1.
 		reply.Success = false
 		return
 	}
-	DPrintf("me:%v,appendArgs:%v", rf.me, args)
+	DPrintf("me:%v,appendArgs:%v,\nlog:%v", rf.me, args, rf.log)
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 	}
 
-	rf.state = follower
+	if rf.state == candidate && rf.currentTerm == args.Term {
+		rf.state = follower
+	}
+
+	rf.checkTerm(args.Term)
 	reply.Term = rf.currentTerm
 	reply.Success = true
 
@@ -665,26 +708,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if rf.getTerm(args.PrevLogIndex) != args.PrevLogTerm { //2.
 		reply.Success = false
+		reply.XTerm = rf.getTerm(args.PrevLogIndex)
+		reply.XIndex = args.PrevLogIndex
+		reply.XLen = len(rf.log)
 		return
 	}
-	if len(args.Entries) != 0 {
-		rf.dealConflict(args, reply) //3.
 
-		rf.changeLog(args.Entries, args.PrevLogIndex) //4.
+	//if len(args.Entries) != 0 {
+	//rf.dealConflict(args, reply)                  //3.
+	//}
+
+	for i, entry := range args.Entries {
+		if rf.getTerm(i+1+args.PrevLogIndex) != entry.Term {
+			rf.log = append(rf.log.cutLog(1, i+1+args.PrevLogIndex), args.Entries[i:]...)
+			break
+		}
 	}
 
 	if args.LeaderCommit > rf.committedIndex { //5.
 		newIndex, _ := rf.getLastLog()
 		rf.committedIndex = min(args.LeaderCommit, newIndex)
 	}
-
-	reply.XLen = len(rf.log)
-
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	rf.mu.Lock()
+	//DPrintf("leader:%v log:%v", rf.me, rf.log)
 	//收到过期回复
 	if reply.Term < rf.currentTerm {
 		ok = false
@@ -694,20 +744,30 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-// 对应figure2的append的3.4
-func (rf *Raft) changeLog(entries []Entry, index int) {
-	if len(entries) == 0 {
+type Entries []Entry
+
+// don't Include endIndex 1 2
+func (EntriesIn Entries) cutLog(startIndex int, endIndex int) (resultEntries Entries) {
+	length := len(EntriesIn)
+	if startIndex < 1 {
+		DPrintf("startIndex must bigger than 1")
 		return
 	}
 
-	index1, isNull := rf.getFirstIndex(rf.log)
-
-	if isNull { //rf log 为空
-		rf.log = append(rf.log, entries...)
-	} else {
-		rf.log = append(rf.log[:index-index1+1], entries...)
+	if startIndex > endIndex-1 {
+		DPrintf("startIndex>endIndex-1")
+		return
+	} else if startIndex == endIndex-1 {
+		resultEntries = Entries{EntriesIn[startIndex-1]}
 	}
-	//DPrintf("log now:%v", rf.log)
+
+	if length+1 < endIndex {
+		resultEntries = EntriesIn[startIndex-1:]
+	} else {
+		resultEntries = EntriesIn[startIndex-1 : endIndex-1]
+	}
+	DPrintf("entries:%v,endIndex:%v", resultEntries, endIndex)
+	return
 }
 
 func (rf *Raft) dealConflict(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -716,7 +776,7 @@ func (rf *Raft) dealConflict(args *AppendEntriesArgs, reply *AppendEntriesReply)
 	log := rf.log
 	logFirstIndex := args.Entries[0].Index
 	if null || logFirstIndex > lastIndex { //follower的log为空或者不如entries长
-		DPrintf("here")
+		//DPrintf("here")
 		reply.XTerm = lastTerm
 		reply.XIndex = lastIndex
 		reply.XLen = len(rf.log)
@@ -739,49 +799,52 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 	for !rf.killed() {
 		rf.mu.Lock()
 		limits := len(rf.peers) / 2
-		nextApply := rf.lastApplied + 1
-		state := rf.state
-		committedIndex := rf.committedIndex
-		matchIndex := make([]int, len(rf.matchIndex)) // 保存 matchIndex 副本
-		copy(matchIndex, rf.matchIndex)
-		lastApplied := rf.lastApplied
 		firstIndex, _ := rf.getFirstIndex(rf.log)
-		log := rf.log
-		rf.mu.Unlock()
 
-		if state == leader {
+		if rf.state == leader {
 			counts := 0
-			if nextApply > committedIndex {
-				for i, _ := range matchIndex {
-					if matchIndex[i] >= nextApply {
+			if rf.lastApplied+1 > rf.committedIndex {
+				for i, _ := range rf.matchIndex {
+					if rf.matchIndex[i] >= rf.lastApplied+1 {
 						counts++
 					}
 				}
 				if counts >= limits {
-					rf.mu.Lock()
-					rf.committedIndex = nextApply
-					committedIndex = nextApply
-					DPrintf("leader update committed,%v", nextApply)
-					rf.mu.Unlock()
+					rf.committedIndex = rf.lastApplied + 1
+					DPrintf("leader update committed,%v", rf.lastApplied+1)
 				}
 			}
 		}
 
-		if committedIndex > lastApplied {
+		for rf.committedIndex > rf.lastApplied {
 			var applyMsg ApplyMsg
 			applyMsg.CommandValid = true
-			applyMsg.CommandIndex = nextApply
-			applyMsg.Command = log[nextApply-firstIndex].Command
+			applyMsg.CommandIndex = rf.lastApplied + 1
+			applyMsg.Command = rf.log[rf.lastApplied+1-firstIndex].Command
 			applyCh <- applyMsg
 			DPrintf("id:%v apply %v", rf.me, applyMsg)
-			rf.mu.Lock()
 			rf.lastApplied++
-			rf.mu.Unlock()
 		}
+		rf.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 func (rf *Raft) timeUpdate() {
 	rf.time = time.Now()
+}
+
+func (rf *Raft) searchTerm(Xterm int) (isHave bool, firstIndex int, lastIndex int) {
+	sign := false
+	for i, entry := range rf.log {
+		if entry.Term == Xterm {
+			isHave = true
+			if !sign {
+				firstIndex = i
+				sign = true
+			}
+			lastIndex = max(lastIndex, i+1)
+		}
+	}
+	return
 }

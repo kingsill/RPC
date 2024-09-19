@@ -957,7 +957,7 @@ func TestFigure8Unreliable3C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
-
+	DPrintf("-------- last log ---------------")
 	cfg.one(rand.Int()%10000, servers, true)
 
 	cfg.end()
