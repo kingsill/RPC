@@ -352,28 +352,28 @@ func (rf *Raft) ticker() {
 	heartTime := 100 * time.Millisecond
 	for rf.killed() == false {
 		rf.mu.Lock()
-		msOut := time.Duration(150+(rand.Int63()%300)) * time.Millisecond
+		msOut := time.Duration(100+(rand.Int63()%300)) * time.Millisecond
 		// Your code here (3A)
 		// Check if a leader election should be started.
 		session := time.Since(rf.time)
 		//DPrintf("%v session:%v", rf.me, session)
 		//DPrintf("id:%v,log:%v,committedIndex:%v", rf.me, rf.log, rf.committedIndex)
 		//leader不会超时
-		if session > msOut && rf.state != leader {
+		if session > msOut && rf.state == follower {
 			//开始选举
 			rf.mu.Unlock()
 			go rf.startElection()
 			// pause for a random amount of time between 50 and 350
 			// milliseconds.
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(15 * time.Millisecond)
 		} else if session > heartTime && rf.state == leader { //心跳计时
 			rf.mu.Unlock()
 			go rf.heartBeats()
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(15 * time.Millisecond)
 			//间隔
 		} else {
 			rf.mu.Unlock()
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(15 * time.Millisecond)
 		}
 
 	}
@@ -726,8 +726,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.LeaderCommit > rf.committedIndex { //5.
-		newIndex, _ := rf.getLastLog()
-		rf.committedIndex = min(args.LeaderCommit, newIndex)
+		//newIndex, _ := rf.getLastLog()
+		//rf.committedIndex = min(args.LeaderCommit, newIndex)
+		rf.committedIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
 	}
 }
 
@@ -818,12 +819,13 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 
 		for rf.committedIndex > rf.lastApplied {
 			var applyMsg ApplyMsg
+			rf.lastApplied++
 			applyMsg.CommandValid = true
-			applyMsg.CommandIndex = rf.lastApplied + 1
-			applyMsg.Command = rf.log[rf.lastApplied+1-firstIndex].Command
+			applyMsg.CommandIndex = rf.lastApplied
+			applyMsg.Command = rf.log[rf.lastApplied-firstIndex].Command
 			applyCh <- applyMsg
 			DPrintf("id:%v apply %v", rf.me, applyMsg)
-			rf.lastApplied++
+
 		}
 		rf.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
