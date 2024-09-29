@@ -20,6 +20,8 @@ package raft
 import (
 	"6.5840/labgob"
 	"bytes"
+	"log"
+	"math"
 	"sort"
 
 	//	"bytes"
@@ -350,7 +352,7 @@ func (rf *Raft) killed() bool {
 // TODO ticker
 // 选举和超时定时器
 func (rf *Raft) ticker() {
-	heartTime := 20 * time.Millisecond
+	heartTime := 100 * time.Millisecond
 	for rf.killed() == false {
 		rf.mu.Lock()
 		msOut := time.Duration(300+(rand.Int63()%300)) * time.Millisecond
@@ -600,20 +602,33 @@ func (rf *Raft) heartBeats() {
 							//} else if len(args.Entries) != 0 {
 						} else {
 							DPrintf("leader:%v,from %v,reply:%v", rf.me, i, reply)
+							//if reply.XTerm == -1 {
+							//	rf.nextIndex[i] = reply.XLen + 1
+							//	DPrintf("follower too short")
+							//} else {
+							//	isHave, _, lastIndex := rf.searchTerm(reply.XTerm)
+							//	if isHave {
+							//		rf.nextIndex[i] = lastIndex
+							//		DPrintf("same term")
+							//	} else {
+							//		DPrintf("different Term")
+							//		rf.nextIndex[i] = reply.XIndex
+							//	}
+							//}
+							//DPrintf("leaderId:%v,nextIndex:%v", rf.me, rf.nextIndex)
 							if reply.XTerm == -1 {
+								// follower's log is too short
 								rf.nextIndex[i] = reply.XLen + 1
-								DPrintf("follower too short")
 							} else {
-								isHave, _, lastIndex := rf.searchTerm(reply.XTerm)
-								if isHave {
-									rf.nextIndex[i] = lastIndex
-									DPrintf("same term")
+								_, maxIndex := rf.log.getBoundsWithTerm(reply.XTerm)
+								if maxIndex != -1 {
+									// leader has XTerm
+									rf.nextIndex[i] = maxIndex
 								} else {
-									DPrintf("different Term")
+									// leader doesn't have XTerm
 									rf.nextIndex[i] = reply.XIndex
 								}
 							}
-							DPrintf("leaderId:%v,nextIndex:%v", rf.me, rf.nextIndex)
 						}
 					}
 				}
@@ -710,9 +725,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if rf.getTerm(args.PrevLogIndex) != args.PrevLogTerm { //2.
 		reply.Success = false
-		reply.XTerm = rf.getTerm(args.PrevLogIndex)
-		reply.XIndex = args.PrevLogIndex
+		//reply.XTerm = rf.getTerm(args.PrevLogIndex)
+		//reply.XIndex = args.PrevLogIndex
+		//reply.XLen = len(rf.log)
 		reply.XLen = len(rf.log)
+		reply.XTerm = rf.log.getEntry(args.PrevLogIndex).Term
+		reply.XIndex, _ = rf.log.getBoundsWithTerm(reply.XTerm)
 		return
 	}
 
@@ -854,4 +872,42 @@ func (rf *Raft) searchTerm(Xterm int) (isHave bool, firstIndex int, lastIndex in
 		}
 	}
 	return
+}
+
+// Get the index of first entry and last entry with the given term.
+// Return (-1,-1) if no such term is found
+func (logEntries Entries) getBoundsWithTerm(term int) (minIndex int, maxIndex int) {
+	if term == 0 {
+		return 0, 0
+	}
+	minIndex, maxIndex = math.MaxInt, -1
+	for i := 1; i <= len(logEntries); i++ {
+		if logEntries.getEntry(i).Term == term {
+			minIndex = min(minIndex, i)
+			maxIndex = max(maxIndex, i)
+		}
+	}
+	if maxIndex == -1 {
+		return -1, -1
+	}
+	return
+}
+
+func (logEntries Entries) getEntry(index int) *Entry {
+	if index < 0 {
+		log.Panic("LogEntries.getEntry: index < 0.\n")
+	}
+	if index == 0 {
+		return &Entry{
+			Command: nil,
+			Term:    0,
+		}
+	}
+	if index > len(logEntries) {
+		return &Entry{
+			Command: nil,
+			Term:    -1,
+		}
+	}
+	return &logEntries[index-1]
 }
