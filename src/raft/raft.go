@@ -20,6 +20,8 @@ package raft
 import (
 	"6.5840/labgob"
 	"bytes"
+	"sort"
+
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -210,7 +212,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("requestVote outTime,%v deny", rf.me)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
-
 		return
 	}
 
@@ -281,8 +282,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	//DPrintf("%v sendRequestVOte", rf.me)
 	rf.mu.Lock()
-	if ok && reply.Term < rf.currentTerm { //忽略过时消息
-		DPrintf("ignore timeout Msg")
+	if reply.Term < rf.currentTerm { //忽略过时消息
+		DPrintf("reply.term:%v,currentTerm:%v,ignore timeout Msg", reply.Term, rf.currentTerm)
 		ok = false
 	}
 	rf.mu.Unlock()
@@ -349,17 +350,17 @@ func (rf *Raft) killed() bool {
 // TODO ticker
 // 选举和超时定时器
 func (rf *Raft) ticker() {
-	heartTime := 100 * time.Millisecond
+	heartTime := 50 * time.Millisecond
 	for rf.killed() == false {
 		rf.mu.Lock()
-		msOut := time.Duration(100+(rand.Int63()%300)) * time.Millisecond
+		msOut := time.Duration(250+(rand.Int63()%250)) * time.Millisecond
 		// Your code here (3A)
 		// Check if a leader election should be started.
 		session := time.Since(rf.time)
 		//DPrintf("%v session:%v", rf.me, session)
 		//DPrintf("id:%v,log:%v,committedIndex:%v", rf.me, rf.log, rf.committedIndex)
 		//leader不会超时
-		if session > msOut && rf.state == follower {
+		if session > msOut && rf.state != leader {
 			//开始选举
 			rf.mu.Unlock()
 			go rf.startElection()
@@ -537,7 +538,7 @@ func (rf *Raft) leaderInit() {
 	for i, _ := range nextIndex {
 		//初始化leader的参数
 		rf.nextIndex[i] = index + 1
-		rf.matchIndex[i] = 0
+		rf.matchIndex[i] = -1
 
 		if i != rf.me { //发送宣布心跳
 			go func(i int) {
@@ -721,6 +722,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i, entry := range args.Entries {
 		if rf.getTerm(i+1+args.PrevLogIndex) != entry.Term {
 			rf.log = append(rf.log.cutLog(1, i+1+args.PrevLogIndex), args.Entries[i:]...)
+
 			break
 		}
 	}
@@ -740,7 +742,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	if reply.Term < rf.currentTerm {
 		ok = false
 	}
-
+	//if args.Term != rf.currentTerm {
+	//	DPrintf("leader now term has changed, discard this ")
+	//	ok = false
+	//}
 	rf.mu.Unlock()
 	return ok
 }
@@ -801,20 +806,19 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 		rf.mu.Lock()
 		limits := len(rf.peers) / 2
 		firstIndex, _ := rf.getFirstIndex(rf.log)
-
+		matchIndex := rf.matchIndex
 		if rf.state == leader {
-			counts := 0
-			if rf.lastApplied+1 > rf.committedIndex {
-				for i, _ := range rf.matchIndex {
-					if rf.matchIndex[i] >= rf.lastApplied+1 {
-						counts++
-					}
-				}
-				if counts >= limits {
-					rf.committedIndex = rf.lastApplied + 1
-					DPrintf("leader update committed,%v", rf.lastApplied+1)
+			sort.Ints(matchIndex)
+			committedIndex := max(rf.committedIndex, matchIndex[limits+1])
+			DPrintf("matchIndex:%v", matchIndex)
+
+			if committedIndex != 0 {
+				//log's term must be equal to currentTerm
+				if rf.log[committedIndex-1].Term == rf.currentTerm {
+					rf.committedIndex = committedIndex
 				}
 			}
+
 		}
 
 		for rf.committedIndex > rf.lastApplied {
