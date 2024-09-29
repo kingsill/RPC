@@ -350,10 +350,10 @@ func (rf *Raft) killed() bool {
 // TODO ticker
 // 选举和超时定时器
 func (rf *Raft) ticker() {
-	heartTime := 50 * time.Millisecond
+	heartTime := 20 * time.Millisecond
 	for rf.killed() == false {
 		rf.mu.Lock()
-		msOut := time.Duration(250+(rand.Int63()%250)) * time.Millisecond
+		msOut := time.Duration(300+(rand.Int63()%300)) * time.Millisecond
 		// Your code here (3A)
 		// Check if a leader election should be started.
 		session := time.Since(rf.time)
@@ -694,6 +694,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.state = follower
 	}
 
 	if rf.state == candidate && rf.currentTerm == args.Term {
@@ -742,10 +743,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	if reply.Term < rf.currentTerm {
 		ok = false
 	}
-	//if args.Term != rf.currentTerm {
-	//	DPrintf("leader now term has changed, discard this ")
-	//	ok = false
-	//}
+	if args.Term != rf.currentTerm {
+		DPrintf("leader now term has changed, discard this ")
+		ok = false
+	}
 	rf.mu.Unlock()
 	return ok
 }
@@ -810,7 +811,7 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 		if rf.state == leader {
 			sort.Ints(matchIndex)
 			committedIndex := max(rf.committedIndex, matchIndex[limits+1])
-			DPrintf("matchIndex:%v", matchIndex)
+			//DPrintf("matchIndex:%v", matchIndex)
 
 			if committedIndex != 0 {
 				//log's term must be equal to currentTerm
